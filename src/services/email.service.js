@@ -9,7 +9,13 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
   try {
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || process.env.STORE_NAME || 'Magizhchi Garments';
-    const fromEmail = settings?.store?.email || process.env.EMAIL_FROM || process.env.EMAIL_USER || 'info@magizhchi.com';
+    
+    // Safety check: ensure fromEmail is never empty or invalid
+    let fromEmail = settings?.store?.email || process.env.EMAIL_FROM || process.env.EMAIL_USER;
+    if (!fromEmail || fromEmail.includes('placeholder')) {
+      fromEmail = 'lncoderise@gmail.com'; // Verified fallback based on logs
+    }
+    
     const from = `${storeName} <${fromEmail}>`;
 
     const purposes = {
