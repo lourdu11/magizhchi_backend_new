@@ -12,27 +12,21 @@ const getTransporter = async () => {
     const config = settings?.notifications?.email;
 
     // Use DB settings if fully configured (host, user, and non-empty password)
-    const isGmail = config?.user?.endsWith('@gmail.com');
     if (config?.host && config?.user && config?.password && config.password.trim() !== '') {
       logger.info(`📧 Email: Using Database settings (Host: ${config.host})`);
       return nodemailer.createTransport({
-        host: isGmail ? 'smtp.gmail.com' : config.host,
-        port: isGmail ? 465 : parseInt(config.port || '587'),
-        secure: isGmail ? true : (parseInt(config.port) === 465),
+        host: config.host,
+        port: parseInt(config.port || '587'),
+        secure: parseInt(config.port) === 465,
         auth: {
           user: config.user,
           pass: config.password.replace(/\s/g, ''), 
         },
         tls: {
-          rejectUnauthorized: false,
-          minVersion: 'TLSv1.2'
+          rejectUnauthorized: false
         },
-        connectionTimeout: 20000,
-        greetingTimeout: 20000,
-        debug: true,
-        logger: true,
-        family: 4,
-        localAddress: '0.0.0.0'
+        connectionTimeout: 15000,
+        family: 4
       });
     }
 
@@ -52,27 +46,25 @@ const getTransporter = async () => {
       });
     }
 
-    const isGmailEnv = envUser?.endsWith('@gmail.com');
+    const envHost = process.env.EMAIL_HOST || 'smtp.gmail.com';
+    const envPort = parseInt(process.env.EMAIL_PORT || '465');
+    const envSecure = process.env.EMAIL_SECURE === 'true' || envPort === 465;
+
+    logger.info(`📧 Email: Connecting to ${envHost}:${envPort} (User: ${envUser || 'None'})`);
 
     return nodemailer.createTransport({
-      host: 'smtp.gmail.com', // Force Gmail host directly
-      port: 465, // Try Port 465 (SSL) as it often works better on Render
-      secure: true,
+      host: envHost,
+      port: envPort,
+      secure: envSecure,
       auth: {
         user: envUser,
         pass: envPass ? envPass.replace(/\s/g, '') : '', 
       },
       tls: {
-        rejectUnauthorized: false,
-        minVersion: 'TLSv1.2'
+        rejectUnauthorized: false
       },
-      connectionTimeout: 20000,
-      greetingTimeout: 20000,
-      socketTimeout: 30000,
-      debug: true,
-      logger: true,
-      family: 4,
-      localAddress: '0.0.0.0' // Force outbound to use IPv4 local address
+      connectionTimeout: 15000,
+      family: 4
     });
   } catch (err) {
     logger.error('Error creating email transporter:', err);
