@@ -107,7 +107,7 @@ const saveSessionToDb = async () => {
         await WhatsAppSession.findOneAndUpdate(
             { key: 'baileys-auth' },
             { data: JSON.stringify(sessionData) },
-            { upsert: true, new: true }
+            { upsert: true, returnDocument: 'after' }
         );
         logger.debug('💾 WhatsApp: Session synced to MongoDB');
     } catch (err) {
