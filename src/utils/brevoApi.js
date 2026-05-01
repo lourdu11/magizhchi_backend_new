@@ -52,19 +52,29 @@ const sendBrevoApi = async (options) => {
       let responseData = '';
       res.on('data', (chunk) => { responseData += chunk; });
       res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          logger.info(`✅ Brevo API Success: ${toList.map(t => t.email).join(', ')}`);
-          resolve(JSON.parse(responseData));
-        } else {
-          logger.error(`❌ Brevo API Error (${res.statusCode}): ${responseData}`);
-          reject(new Error(`Brevo API Error: ${responseData}`));
+        try {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            logger.info(`✅ Brevo API Success: ${toList.map(t => t.email).join(', ')}`);
+            resolve(responseData ? JSON.parse(responseData) : { success: true });
+          } else {
+            logger.error(`❌ Brevo API Error (${res.statusCode}): ${responseData}`);
+            reject(new Error(`Brevo API Error (${res.statusCode}): ${responseData}`));
+          }
+        } catch (parseErr) {
+          logger.error(`❌ Brevo API Parse Error: ${parseErr.message} | Raw: ${responseData}`);
+          reject(new Error('Failed to parse Brevo API response'));
         }
       });
     });
 
     req.on('error', (err) => {
-      logger.error('❌ Brevo API Request Failed:', err.message);
+      logger.error(`❌ Brevo API Request Failed: ${err.message}`);
       reject(err);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Brevo API request timed out'));
     });
 
     req.write(data);
