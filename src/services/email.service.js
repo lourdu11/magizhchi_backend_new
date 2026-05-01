@@ -52,12 +52,122 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
 };
 
 /**
- * Placeholder for other emails
+ * Sends Order Confirmation to Customer
  */
-const sendOrderConfirmationEmail = async () => {};
-const sendLowStockEmail = async () => {};
-const sendAdminOrderNotificationEmail = async () => {};
-const sendAdminContactNotificationEmail = async () => {};
+const sendOrderConfirmationEmail = async (order) => {
+  try {
+    const settings = await Settings.findOne().lean();
+    const storeName = settings?.store?.name || 'Magizhchi Garments';
+    const { orderConfirmationTemplate } = require('../utils/emailTemplates');
+    
+    const html = orderConfirmationTemplate(order, storeName);
+    const mailOptions = {
+      from: `${storeName} <lncoderise@gmail.com>`,
+      fromEmail: 'lncoderise@gmail.com',
+      fromName: storeName,
+      to: order.guestDetails?.email || order.shippingAddress?.email || order.userId?.email,
+      subject: `Order Confirmed #${order.orderNumber} — ${storeName}`,
+      replyTo: 'lncoderise@gmail.com',
+      html
+    };
+
+    const { sendBrevoApi } = require('../utils/brevoApi');
+    return await sendBrevoApi(mailOptions);
+  } catch (err) {
+    logger.error(`🔥 Order Confirmation Email Error: ${err.message}`);
+  }
+};
+
+/**
+ * Sends Low Stock Alert to Admin
+ */
+const sendLowStockEmail = async (product) => {
+  try {
+    const settings = await Settings.findOne().lean();
+    const adminEmail = settings?.notifications?.adminEmail || 'lncoderise@gmail.com';
+    const storeName = settings?.store?.name || 'Magizhchi Garments';
+    const { lowStockTemplate } = require('../utils/emailTemplates');
+
+    const html = lowStockTemplate(product, storeName);
+    const mailOptions = {
+      from: `System Alert <lncoderise@gmail.com>`,
+      to: adminEmail,
+      subject: `⚠️ LOW STOCK: ${product.name}`,
+      html
+    };
+
+    const { sendBrevoApi } = require('../utils/brevoApi');
+    return await sendBrevoApi(mailOptions);
+  } catch (err) {
+    logger.error(`🔥 Low Stock Email Error: ${err.message}`);
+  }
+};
+
+/**
+ * Sends New Order Alert to Admin
+ */
+const sendAdminOrderNotificationEmail = async (order) => {
+  try {
+    const settings = await Settings.findOne().lean();
+    const adminEmail = settings?.notifications?.adminEmail || 'lncoderise@gmail.com';
+    const storeName = settings?.store?.name || 'Magizhchi Garments';
+    const { adminOrderTemplate } = require('../utils/emailTemplates');
+
+    const html = adminOrderTemplate(order, storeName);
+    const mailOptions = {
+      from: `Sales Notification <lncoderise@gmail.com>`,
+      to: adminEmail,
+      subject: `🎉 New Order #${order.orderNumber}`,
+      html
+    };
+
+    const { sendBrevoApi } = require('../utils/brevoApi');
+    return await sendBrevoApi(mailOptions);
+  } catch (err) {
+    logger.error(`🔥 Admin Order Email Error: ${err.message}`);
+  }
+};
+
+/**
+ * Sends Contact Form Notification to Admin
+ */
+const sendAdminContactNotificationEmail = async (contactData) => {
+  try {
+    const settings = await Settings.findOne().lean();
+    const adminEmail = settings?.notifications?.adminEmail || 'lncoderise@gmail.com';
+    const { generateEmailHTML } = require('../utils/emailTemplates');
+
+    const body = `
+      <h2>New Inquiry Received</h2>
+      <p>A customer has sent a message via the contact form:</p>
+      <div style="background-color:#f3f4f6; padding:20px; border-radius:8px; margin:20px 0">
+        <p><b>Name:</b> ${contactData.name}<br/>
+        <b>Email:</b> ${contactData.email}<br/>
+        <b>Subject:</b> ${contactData.subject || 'N/A'}<br/>
+        <b>Message:</b><br/>${contactData.message}</p>
+      </div>
+    `;
+
+    const html = generateEmailHTML({
+      title: 'New Contact Inquiry',
+      body,
+      storeName: settings?.store?.name || 'Magizhchi Garments'
+    });
+
+    const mailOptions = {
+      from: `Contact Form <lncoderise@gmail.com>`,
+      to: adminEmail,
+      subject: `📩 New Contact Inquiry: ${contactData.subject || 'Support'}`,
+      html
+    };
+
+    const { sendBrevoApi } = require('../utils/brevoApi');
+    return await sendBrevoApi(mailOptions);
+  } catch (err) {
+    logger.error(`🔥 Contact Email Error: ${err.message}`);
+  }
+};
+
 const sendAdminOrderCancellationEmail = async () => {};
 
 module.exports = { 
