@@ -93,15 +93,35 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: from,
+  const isResend = process.env.EMAIL_HOST === 'smtp.resend.com';
+  const mailOptions = {
+    from,
     to: email,
     subject: `${meta.subject} — ${storeName}`,
     html,
     text: `Your OTP for ${meta.action} is: ${otp}\n\nValid for ${expireMin} minutes.\nDo not share this with anyone.`,
-  });
+  };
 
-  logger.info(`OTP email sent to: ${email} [purpose: ${purpose}]`);
+  try {
+    if (isResend) {
+      const { sendResendApi } = require('../utils/resendApi');
+      await sendResendApi(mailOptions);
+    } else {
+      await transporter.sendMail(mailOptions);
+    }
+    logger.info(`OTP email sent to: ${email} [purpose: ${purpose}]`);
+  } catch (err) {
+    logger.error(`❌ Email Failed: ${err.message}`);
+    // If it was not resend but failed, and we have resend key, try as final fallback
+    if (!isResend && process.env.EMAIL_PASSWORD?.startsWith('re_')) {
+      try {
+        const { sendResendApi } = require('../utils/resendApi');
+        await sendResendApi(mailOptions);
+      } catch (retryErr) {
+        logger.error('Final email fallback failed');
+      }
+    }
+  }
 };
 
 // ─── Order Confirmation Email ─────────────────────────────────
@@ -158,14 +178,25 @@ const sendOrderConfirmationEmail = async (email, order) => {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: from,
+  const isResend = process.env.EMAIL_HOST === 'smtp.resend.com';
+  const mailOptions = {
+    from,
     to: email,
     subject: `Order Confirmed #${order.orderNumber} — ${storeName}`,
     html,
-  });
+  };
 
-  logger.info(`Order confirmation sent to: ${email} [order: ${order.orderNumber}]`);
+  try {
+    if (isResend) {
+      const { sendResendApi } = require('../utils/resendApi');
+      await sendResendApi(mailOptions);
+    } else {
+      await transporter.sendMail(mailOptions);
+    }
+    logger.info(`Order confirmation sent to: ${email} [order: ${order.orderNumber}]`);
+  } catch (err) {
+    logger.error(`❌ Email Failed: ${err.message}`);
+  }
 };
 
 // ─── Low Stock Alert Email ─────────────────────────────────────
@@ -211,14 +242,25 @@ const sendLowStockEmail = async (email, item, currentStock) => {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: from,
+  const isResend = process.env.EMAIL_HOST === 'smtp.resend.com';
+  const mailOptions = {
+    from,
     to: email,
     subject: `🚨 Low Stock Alert: ${item.productName} — ${storeName}`,
     html,
-  });
+  };
 
-  logger.info(`Low stock alert email sent to: ${email} [product: ${item.productName}]`);
+  try {
+    if (isResend) {
+      const { sendResendApi } = require('../utils/resendApi');
+      await sendResendApi(mailOptions);
+    } else {
+      await transporter.sendMail(mailOptions);
+    }
+    logger.info(`Low stock alert email sent to: ${email} [product: ${item.productName}]`);
+  } catch (err) {
+    logger.error(`❌ Email Failed: ${err.message}`);
+  }
 };
 
 /**
@@ -280,14 +322,22 @@ const sendAdminOrderNotificationEmail = async (order) => {
 </body>
 </html>`;
 
+  const isResend = process.env.EMAIL_HOST === 'smtp.resend.com';
+  const mailOptions = {
+    from,
+    to: recipients,
+    subject: `🛍️ NEW ORDER: #${order.orderNumber} — ${storeName}`,
+    html,
+    text: `New order received: #${order.orderNumber}\nCustomer: ${order.shippingAddress?.name}\nTotal: Rs. ${order.pricing?.totalAmount}\nItems:\n${itemsSummary}`,
+  };
+
   try {
-    await transporter.sendMail({
-      from,
-      to: recipients,
-      subject: `🛍️ NEW ORDER: #${order.orderNumber} — ${storeName}`,
-      html,
-      text: `New order received: #${order.orderNumber}\nCustomer: ${order.shippingAddress?.name}\nTotal: Rs. ${order.pricing?.totalAmount}\nItems:\n${itemsSummary}`,
-    });
+    if (isResend) {
+      const { sendResendApi } = require('../utils/resendApi');
+      await sendResendApi(mailOptions);
+    } else {
+      await transporter.sendMail(mailOptions);
+    }
     logger.info(`Admin order notification sent to: ${recipients}`);
   } catch (err) {
     logger.error('Admin Order Notification Error:', err.message);
@@ -347,14 +397,22 @@ const sendAdminContactNotificationEmail = async (contact) => {
 </body>
 </html>`;
 
+  const isResend = process.env.EMAIL_HOST === 'smtp.resend.com';
+  const mailOptions = {
+    from,
+    to: recipients,
+    subject: `📩 NEW CONTACT: ${contact.subject || 'Inquiry'} — ${storeName}`,
+    html,
+    text: `New contact inquiry from ${contact.name}\nEmail: ${contact.email}\nMessage: ${contact.message}`,
+  };
+
   try {
-    await transporter.sendMail({
-      from,
-      to: recipients,
-      subject: `📩 NEW CONTACT: ${contact.subject || 'Inquiry'} — ${storeName}`,
-      html,
-      text: `New contact inquiry from ${contact.name}\nEmail: ${contact.email}\nMessage: ${contact.message}`,
-    });
+    if (isResend) {
+      const { sendResendApi } = require('../utils/resendApi');
+      await sendResendApi(mailOptions);
+    } else {
+      await transporter.sendMail(mailOptions);
+    }
     logger.info(`Admin contact notification sent to: ${recipients}`);
   } catch (err) {
     logger.error('Admin Contact Notification Error:', err.message);
@@ -407,14 +465,22 @@ const sendAdminOrderCancellationEmail = async (order, reason) => {
 </body>
 </html>`;
 
+  const isResend = process.env.EMAIL_HOST === 'smtp.resend.com';
+  const mailOptions = {
+    from,
+    to: recipients,
+    subject: `🚫 ORDER CANCELLED: #${order.orderNumber} — ${storeName}`,
+    html,
+    text: `Order #${order.orderNumber} has been cancelled.\nReason: ${reason}`,
+  };
+
   try {
-    await transporter.sendMail({
-      from,
-      to: recipients,
-      subject: `🚫 ORDER CANCELLED: #${order.orderNumber} — ${storeName}`,
-      html,
-      text: `Order #${order.orderNumber} has been cancelled.\nReason: ${reason}`,
-    });
+    if (isResend) {
+      const { sendResendApi } = require('../utils/resendApi');
+      await sendResendApi(mailOptions);
+    } else {
+      await transporter.sendMail(mailOptions);
+    }
     logger.info(`Admin cancellation notification sent to: ${recipients}`);
   } catch (err) {
     logger.error('Admin Cancellation Notification Error:', err.message);
