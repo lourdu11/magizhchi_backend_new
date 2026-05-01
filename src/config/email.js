@@ -19,8 +19,11 @@ const getTransporter = async () => {
         secure: parseInt(config.port) === 465,
         auth: {
           user: config.user,
-          pass: config.password.replace(/\s/g, ''), // Strip spaces for Gmail App Passwords
+          pass: config.password.replace(/\s/g, ''), 
         },
+        tls: {
+          rejectUnauthorized: false
+        }
       });
     }
 
@@ -43,8 +46,11 @@ const getTransporter = async () => {
       secure: process.env.EMAIL_SECURE === 'true' || process.env.EMAIL_PORT === '465',
       auth: {
         user: envUser,
-        pass: envPass ? envPass.replace(/\s/g, '') : '', // Strip spaces for Gmail App Passwords
+        pass: envPass ? envPass.replace(/\s/g, '') : '', 
       },
+      tls: {
+        rejectUnauthorized: false // Often required in cloud environments
+      }
     });
   } catch (err) {
     logger.error('Error creating email transporter:', err);
