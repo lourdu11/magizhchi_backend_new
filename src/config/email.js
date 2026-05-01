@@ -30,7 +30,8 @@ const getTransporter = async () => {
         connectionTimeout: 20000,
         greetingTimeout: 20000,
         debug: true,
-        logger: true
+        logger: true,
+        family: 4
       });
     }
 
@@ -64,11 +65,12 @@ const getTransporter = async () => {
         rejectUnauthorized: false,
         minVersion: 'TLSv1.2'
       },
-      connectionTimeout: 20000, // Increase to 20s
+      connectionTimeout: 20000,
       greetingTimeout: 20000,
       socketTimeout: 30000,
-      debug: true, // Enable more detail in logs
-      logger: true
+      debug: true,
+      logger: true,
+      family: 4 // Force IPv4 (fixes Render connection issues)
     });
   } catch (err) {
     logger.error('Error creating email transporter:', err);

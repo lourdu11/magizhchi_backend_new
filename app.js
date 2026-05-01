@@ -60,6 +60,7 @@ const { protect, isAdmin } = require('./src/middlewares/auth');
 
 
 const app = express();
+app.set('trust proxy', 1); // Trust Render proxy for rate limiting
 
 
 // ─── Security Middleware ───────────────────────────────────────
