@@ -16,8 +16,7 @@ const getTransporter = async () => {
     if (config?.host && config?.user && config?.password && config.password.trim() !== '') {
       logger.info(`📧 Email: Using Database settings (Host: ${config.host})`);
       return nodemailer.createTransport({
-        service: isGmail ? 'gmail' : undefined,
-        host: isGmail ? undefined : config.host,
+        host: isGmail ? 'smtp.gmail.com' : config.host,
         port: parseInt(config.port || '587'),
         secure: parseInt(config.port) === 465,
         auth: {
@@ -25,10 +24,13 @@ const getTransporter = async () => {
           pass: config.password.replace(/\s/g, ''), 
         },
         tls: {
-          rejectUnauthorized: false
+          rejectUnauthorized: false,
+          minVersion: 'TLSv1.2'
         },
-        connectionTimeout: 10000,
-        greetingTimeout: 10000
+        connectionTimeout: 20000,
+        greetingTimeout: 20000,
+        debug: true,
+        logger: true
       });
     }
 
@@ -51,20 +53,22 @@ const getTransporter = async () => {
     const isGmailEnv = envUser?.endsWith('@gmail.com');
 
     return nodemailer.createTransport({
-      service: isGmailEnv ? 'gmail' : undefined,
-      host: isGmailEnv ? undefined : (process.env.EMAIL_HOST || 'smtp.gmail.com'),
+      host: isGmailEnv ? 'smtp.gmail.com' : (process.env.EMAIL_HOST || 'smtp.gmail.com'),
       port: parseInt(process.env.EMAIL_PORT || '587'),
-      secure: process.env.EMAIL_SECURE === 'true' || process.env.EMAIL_PORT === '465',
+      secure: process.env.EMAIL_PORT === '465', // true for 465, false for 587
       auth: {
         user: envUser,
         pass: envPass ? envPass.replace(/\s/g, '') : '', 
       },
       tls: {
-        rejectUnauthorized: false
+        rejectUnauthorized: false,
+        minVersion: 'TLSv1.2'
       },
-      connectionTimeout: 10000, // 10s
-      greetingTimeout: 10000,   // 10s
-      socketTimeout: 20000      // 20s
+      connectionTimeout: 20000, // Increase to 20s
+      greetingTimeout: 20000,
+      socketTimeout: 30000,
+      debug: true, // Enable more detail in logs
+      logger: true
     });
   } catch (err) {
     logger.error('Error creating email transporter:', err);
