@@ -113,42 +113,48 @@ exports.login = async (req, res, next) => {
 // Sends OTP: email → email, phone → WhatsApp
 exports.forgotPassword = async (req, res, next) => {
   const { identifier } = req.body;
-  logger.info(`🔑 ForgotPassword Attempt: ${identifier}`);
+  logger.info(`🔥🔥🔥 FORGOT PASSWORD START: ${identifier}`);
   try {
-    if (!identifier)
+    if (!identifier) {
+      logger.warn('❌ ForgotPassword: No identifier provided');
       return ApiResponse.error(res, 'Email or phone number required', 400);
+    }
 
     const query = buildQuery(identifier);
-    logger.info(`🔍 Searching for user with query: ${JSON.stringify(query)}`);
+    logger.info(`🔍 ForgotPassword: Query = ${JSON.stringify(query)}`);
+    
     const user = await User.findOne(query);
 
     if (!user) {
-      logger.warn(`❌ User not found for identifier: ${identifier}`);
+      logger.warn(`❌ ForgotPassword: User not found for ${identifier}`);
       return ApiResponse.error(res, 
         isEmail(identifier)
-          ? 'This email is not registered. Please login first to create an account.'
-          : 'This phone number is not registered. Please login first to create an account.',
+          ? 'This email is not registered.'
+          : 'This phone number is not registered.',
         404
       );
     }
 
-    logger.info(`✅ User found: ${user._id}. Calling sendOTP...`);
-    const result = await sendOTP(identifier, 'password_reset');
-    logger.info(`✅ sendOTP result: ${JSON.stringify(result)}`);
+    logger.info(`✅ ForgotPassword: User found (${user._id}). Sending OTP...`);
+    
+    try {
+      const result = await sendOTP(identifier, 'password_reset');
+      logger.info(`✅ ForgotPassword: sendOTP Success: ${JSON.stringify(result)}`);
 
-    const isDevMode = result.method === 'dev_console';
-
-    return ApiResponse.success(res, {
-      method: result.method,
-      identifier: isEmail(identifier)
-        ? identifier.replace(/(.{2}).+(@.+)/, '$1***$2')
-        : identifier.replace(/(\d{2})\d+(\d{2})/, '$1*****$2'),
-    }, isDevMode
-      ? 'OTP sent! Check your server terminal for the code.'
-      : `OTP sent successfully to your ${result.method === 'whatsapp' ? 'WhatsApp' : 'email'} at ${identifier}. Please check ${result.method === 'whatsapp' ? 'your mobile' : 'your inbox/spam folder'}.`
-    );
+      return ApiResponse.success(res, {
+        method: result.method,
+        identifier: isEmail(identifier)
+          ? identifier.replace(/(.{2}).+(@.+)/, '$1***$2')
+          : identifier.replace(/(\d{2})\d+(\d{2})/, '$1*****$2'),
+      }, `OTP sent successfully to your ${result.method === 'whatsapp' ? 'WhatsApp' : 'email'}.`);
+    } catch (otpErr) {
+      logger.error(`❌ ForgotPassword: sendOTP FAILED: ${otpErr.message}`);
+      logger.error(otpErr.stack);
+      return ApiResponse.error(res, `Failed to send OTP: ${otpErr.message}`, 500);
+    }
   } catch (error) {
-    logger.error(`🔥 forgotPassword CRASH for ${identifier}: ${error.stack}`);
+    logger.error(`🔥 ForgotPassword GLOBAL CRASH: ${error.message}`);
+    logger.error(error.stack);
     next(error);
   }
 };
