@@ -2,6 +2,12 @@ require('dotenv').config();
 const app = require('./app');
 const connectDB = require('./src/config/db');
 const logger = require('./src/utils/logger');
+const dns = require('dns');
+
+// Force IPv4 first to fix Render connection issues with Gmail/SMTP
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
 const fs = require('fs');
 const path = require('path');
 
