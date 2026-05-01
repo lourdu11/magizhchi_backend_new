@@ -12,9 +12,9 @@ const sendResendApi = async (options) => {
       return reject(new Error('Resend API Key (EMAIL_PASSWORD) is missing'));
     }
 
-    // Ensure all values are strings and not undefined
+    // For Resend Free tier, we MUST use onboarding@resend.dev unless domain is verified
     const payload = {
-      from: options.from || 'onboarding@resend.dev',
+      from: 'onboarding@resend.dev', 
       to: Array.isArray(options.to) ? options.to : [options.to],
       subject: options.subject || 'Notification',
       html: options.html || '',
