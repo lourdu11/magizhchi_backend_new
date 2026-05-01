@@ -28,13 +28,17 @@ const sendOTP = async (rawIdentifier, purpose = 'register') => {
   const isDev = process.env.NODE_ENV !== 'production';
 
   // Save OTP to DB
+  logger.info(`📟 OTP: Deleting existing for ${identifier}`);
   await OTP.findOneAndDelete({ identifier, purpose });
+  
+  logger.info(`📟 OTP: Creating new record...`);
   await OTP.create({
     identifier,
     purpose,
     otp,
     expiresAt: new Date(Date.now() + expireMinutes * 60 * 1000),
   });
+  logger.info(`📟 OTP: DB record created successfully.`);
 
   if (process.env.NODE_ENV !== 'production') {
     console.log('DEBUG: Flow Detection -> isEmail:', isEmailId, 'isPhone:', isPhoneId, 'normalized:', identifier);

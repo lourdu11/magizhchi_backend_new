@@ -34,16 +34,16 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
     };
 
     if (isBrevo) {
-      logger.info('📧 Using Brevo API...');
+      logger.info(`📧 Email: Using Brevo API for ${email} (From: ${fromEmail})`);
       const { sendBrevoApi } = require('../utils/brevoApi');
       return await sendBrevoApi(mailOptions);
     } else {
-      logger.info('📧 Using SMTP...');
+      logger.info(`📧 Email: Using SMTP for ${email} (Host: ${process.env.EMAIL_HOST || 'default'})`);
       const transporter = await getTransporter();
       return await transporter.sendMail(mailOptions);
     }
   } catch (err) {
-    logger.error('❌ Email Service Error:', err.message);
+    logger.error(`🔥 Email Service Error for ${email}: ${err.stack || err.message}`);
     throw err;
   }
 };

@@ -112,16 +112,18 @@ exports.login = async (req, res, next) => {
 // ─── POST /auth/forgot-password ───────────────────────────────
 // Sends OTP: email → email, phone → WhatsApp
 exports.forgotPassword = async (req, res, next) => {
+  const { identifier } = req.body;
+  logger.info(`🔑 ForgotPassword Attempt: ${identifier}`);
   try {
-    const { identifier } = req.body;
     if (!identifier)
       return ApiResponse.error(res, 'Email or phone number required', 400);
 
-
     const query = buildQuery(identifier);
+    logger.info(`🔍 Searching for user with query: ${JSON.stringify(query)}`);
     const user = await User.findOne(query);
 
     if (!user) {
+      logger.warn(`❌ User not found for identifier: ${identifier}`);
       return ApiResponse.error(res, 
         isEmail(identifier)
           ? 'This email is not registered. Please login first to create an account.'
@@ -130,7 +132,10 @@ exports.forgotPassword = async (req, res, next) => {
       );
     }
 
+    logger.info(`✅ User found: ${user._id}. Calling sendOTP...`);
     const result = await sendOTP(identifier, 'password_reset');
+    logger.info(`✅ sendOTP result: ${JSON.stringify(result)}`);
+
     const isDevMode = result.method === 'dev_console';
 
     return ApiResponse.success(res, {
@@ -143,6 +148,7 @@ exports.forgotPassword = async (req, res, next) => {
       : `OTP sent successfully to your ${result.method === 'whatsapp' ? 'WhatsApp' : 'email'} at ${identifier}. Please check ${result.method === 'whatsapp' ? 'your mobile' : 'your inbox/spam folder'}.`
     );
   } catch (error) {
+    logger.error(`🔥 forgotPassword CRASH for ${identifier}: ${error.stack}`);
     next(error);
   }
 };
