@@ -10,12 +10,8 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || process.env.STORE_NAME || 'Magizhchi Garments';
     
-    // Safety check: ensure fromEmail is never empty or invalid
-    let fromEmail = settings?.store?.email || process.env.EMAIL_FROM || process.env.EMAIL_USER;
-    if (!fromEmail || fromEmail.includes('placeholder')) {
-      fromEmail = 'lncoderise@gmail.com'; // Verified fallback based on logs
-    }
-    
+    // Force use of verified sender for production stability
+    const fromEmail = 'lncoderise@gmail.com'; 
     const from = `${storeName} <${fromEmail}>`;
 
     const purposes = {
@@ -36,6 +32,7 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
       fromName: storeName,
       to: email, 
       subject: `${meta.subject} — ${storeName}`, 
+      replyTo: fromEmail,
       html 
     };
 
