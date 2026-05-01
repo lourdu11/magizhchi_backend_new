@@ -13,6 +13,7 @@ const getTransporter = async () => {
 
     // Use DB settings if fully configured (host, user, and non-empty password)
     if (config?.host && config?.user && config?.password && config.password.trim() !== '') {
+      logger.info(`📧 Email: Using Database settings (Host: ${config.host})`);
       return nodemailer.createTransport({
         host: config.host,
         port: parseInt(config.port || '587'),
@@ -30,9 +31,12 @@ const getTransporter = async () => {
     // Fallback to environment variables
     const envUser = process.env.EMAIL_USER;
     const envPass = process.env.EMAIL_PASSWORD;
+    logger.info(`📧 Email: Using Environment settings (User: ${envUser || 'None'})`);
+    
     const isPlaceholder = !envUser || envUser.includes('placeholder') || envUser === 'your_gmail@gmail.com';
 
     if (isPlaceholder && process.env.NODE_ENV !== 'production') {
+      logger.info('📧 Email: Using Ethereal (Dev) fallback');
       return nodemailer.createTransport({
         host: 'smtp.ethereal.email',
         port: 587,
@@ -49,7 +53,7 @@ const getTransporter = async () => {
         pass: envPass ? envPass.replace(/\s/g, '') : '', 
       },
       tls: {
-        rejectUnauthorized: false // Often required in cloud environments
+        rejectUnauthorized: false
       }
     });
   } catch (err) {
@@ -60,12 +64,20 @@ const getTransporter = async () => {
 
 const verifyEmailConfig = async () => {
   try {
+    logger.info('📧 Email: Verifying SMTP configuration...');
     const transporter = await getTransporter();
-    await transporter.verify();
+    
+    // Set a timeout for verification to avoid hanging
+    const timeout = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('SMTP Verification Timeout (30s)')), 30000)
+    );
+    
+    await Promise.race([transporter.verify(), timeout]);
+    
     logger.info('✅ Email Ready: [SMTP Connected]');
     return true;
   } catch (err) {
-    logger.error('❌ Email Error: SMTP configuration invalid or unreachable.', err.message);
+    logger.error(`❌ Email Error: ${err.message}`);
     return false;
   }
 };
