@@ -81,9 +81,10 @@ const verifyEmailConfig = async () => {
     transporter.verify().then(() => {
       logger.info('✅ Email Ready: [SMTP Connected]');
     }).catch(err => {
-      // If we are using Resend, we don't care about SMTP errors because we use the API
-      if (process.env.EMAIL_HOST === 'smtp.resend.com') {
-        logger.info('ℹ️  SMTP port blocked, but Resend API is active. Emails will still work.');
+      const host = process.env.EMAIL_HOST || '';
+      // If we are using API modes, we don't care about SMTP errors
+      if (host === 'smtp.resend.com' || host === 'api.brevo.com') {
+        logger.info(`ℹ️  SMTP port blocked, but ${host === 'api.brevo.com' ? 'Brevo' : 'Resend'} API is active. Emails will still work.`);
       } else {
         logger.error(`❌ Email Error: ${err.message}`);
       }
