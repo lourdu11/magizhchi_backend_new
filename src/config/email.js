@@ -17,8 +17,8 @@ const getTransporter = async () => {
       logger.info(`📧 Email: Using Database settings (Host: ${config.host})`);
       return nodemailer.createTransport({
         host: isGmail ? 'smtp.gmail.com' : config.host,
-        port: parseInt(config.port || '587'),
-        secure: parseInt(config.port) === 465,
+        port: isGmail ? 465 : parseInt(config.port || '587'),
+        secure: isGmail ? true : (parseInt(config.port) === 465),
         auth: {
           user: config.user,
           pass: config.password.replace(/\s/g, ''), 
@@ -54,9 +54,9 @@ const getTransporter = async () => {
     const isGmailEnv = envUser?.endsWith('@gmail.com');
 
     return nodemailer.createTransport({
-      host: isGmailEnv ? 'smtp.gmail.com' : (process.env.EMAIL_HOST || 'smtp.gmail.com'),
-      port: parseInt(process.env.EMAIL_PORT || '587'),
-      secure: process.env.EMAIL_PORT === '465', // true for 465, false for 587
+      host: 'smtp.gmail.com', // Force Gmail host directly
+      port: 465, // Try Port 465 (SSL) as it often works better on Render
+      secure: true,
       auth: {
         user: envUser,
         pass: envPass ? envPass.replace(/\s/g, '') : '', 
@@ -70,7 +70,7 @@ const getTransporter = async () => {
       socketTimeout: 30000,
       debug: true,
       logger: true,
-      family: 4 // Force IPv4 (fixes Render connection issues)
+      family: 4 
     });
   } catch (err) {
     logger.error('Error creating email transporter:', err);
