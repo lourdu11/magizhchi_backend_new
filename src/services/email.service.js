@@ -3,11 +3,32 @@ const logger = require('../utils/logger');
 const Settings = require('../models/Settings');
 
 /**
+ * HELPER: Get from address and store name (Defined at top to avoid hoisting issues)
+ */
+async function getEmailSettings() {
+  const settings = await Settings.findOne().lean();
+  const storeName = settings?.store?.name || process.env.STORE_NAME || 'Magizhchi Garments';
+  const fromEmail = settings?.store?.email || process.env.EMAIL_USER || 'noreply@magizhchi.com';
+  const from = `${storeName} <${fromEmail}>`;
+  return { storeName, from, fromEmailRaw: fromEmail };
+}
+
+/**
+ * HELPER: Get Admin Recipients
+ */
+async function getAdminRecipients() {
+  const settings = await Settings.findOne().lean();
+  const alertEmail = settings?.notifications?.email?.alertEmail;
+  const storeEmail = settings?.store?.email || process.env.EMAIL_USER;
+  return [...new Set([alertEmail, storeEmail].filter(Boolean))].join(', ');
+}
+
+/**
  * Universal Email Sender Helper
  * Handles dynamic routing between SMTP and HTTP APIs (Resend/Brevo)
  */
-const sendUniversalEmail = async (mailOptions) => {
-  const { storeName, from } = await getEmailSettings();
+async function sendUniversalEmail(mailOptions) {
+  const { storeName, from, fromEmailRaw } = await getEmailSettings();
   const apiPass = (process.env.EMAIL_PASSWORD || '').trim();
   
   // Detection logic based on API Key prefix
@@ -18,7 +39,7 @@ const sendUniversalEmail = async (mailOptions) => {
   const finalOptions = {
     ...mailOptions,
     from: mailOptions.from || from,
-    fromEmail: (mailOptions.from || from).match(/<(.+)>|(\S+@\S+)/)?.[1] || (mailOptions.from || from),
+    fromEmail: mailOptions.fromEmail || fromEmailRaw,
     fromName: mailOptions.fromName || storeName,
   };
 
@@ -56,18 +77,9 @@ const sendUniversalEmail = async (mailOptions) => {
         return await sendBrevoApi(finalOptions).catch(e => logger.error(`Fallback failed (Brevo): ${e.message}`));
       }
     }
-    throw err;
+    throw err; // Re-throw to allow controller to handle 500
   }
-};
-
-// Helper to get from address and store name
-const getEmailSettings = async () => {
-  const settings = await Settings.findOne().lean();
-  const storeName = settings?.store?.name || process.env.STORE_NAME || 'Magizhchi Garments';
-  const fromEmail = settings?.store?.email || process.env.EMAIL_USER || 'noreply@magizhchi.com';
-  const from = `${storeName} <${fromEmail}>`;
-  return { storeName, from };
-};
+}
 
 // ─── OTP Email ────────────────────────────────────────────────
 const sendOTPEmail = async (email, otp, purpose = 'register') => {
@@ -131,13 +143,6 @@ const sendLowStockEmail = async (email, item, currentStock) => {
 };
 
 // ─── Admin Notifications ──────────────────────────────────────
-const getAdminRecipients = async () => {
-  const settings = await Settings.findOne().lean();
-  const alertEmail = settings?.notifications?.email?.alertEmail;
-  const storeEmail = settings?.store?.email || process.env.EMAIL_USER;
-  return [...new Set([alertEmail, storeEmail].filter(Boolean))].join(', ');
-};
-
 const sendAdminOrderNotificationEmail = async (order) => {
   const recipients = await getAdminRecipients();
   if (!recipients) return;
