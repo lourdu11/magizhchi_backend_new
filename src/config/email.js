@@ -12,7 +12,7 @@ const getTransporter = async () => {
     const config = settings?.notifications?.email;
 
     // Use DB settings if fully configured (host, user, and non-empty password)
-    const isGmail = config.user?.endsWith('@gmail.com');
+    const isGmail = config?.user?.endsWith('@gmail.com');
     if (config?.host && config?.user && config?.password && config.password.trim() !== '') {
       logger.info(`📧 Email: Using Database settings (Host: ${config.host})`);
       return nodemailer.createTransport({
@@ -48,11 +48,11 @@ const getTransporter = async () => {
       });
     }
 
-    const isGmail = envUser?.endsWith('@gmail.com');
+    const isGmailEnv = envUser?.endsWith('@gmail.com');
 
     return nodemailer.createTransport({
-      service: isGmail ? 'gmail' : undefined,
-      host: isGmail ? undefined : (process.env.EMAIL_HOST || 'smtp.gmail.com'),
+      service: isGmailEnv ? 'gmail' : undefined,
+      host: isGmailEnv ? undefined : (process.env.EMAIL_HOST || 'smtp.gmail.com'),
       port: parseInt(process.env.EMAIL_PORT || '587'),
       secure: process.env.EMAIL_SECURE === 'true' || process.env.EMAIL_PORT === '465',
       auth: {
