@@ -12,13 +12,16 @@ const sendResendApi = async (options) => {
       return reject(new Error('Resend API Key (EMAIL_PASSWORD) is missing'));
     }
 
-    const data = JSON.stringify({
-      from: options.from,
-      to: options.to,
-      subject: options.subject,
-      html: options.html,
-      text: options.text
-    });
+    // Ensure all values are strings and not undefined
+    const payload = {
+      from: options.from || 'onboarding@resend.dev',
+      to: Array.isArray(options.to) ? options.to : [options.to],
+      subject: options.subject || 'Notification',
+      html: options.html || '',
+      text: options.text || ''
+    };
+
+    const data = JSON.stringify(payload);
 
     const reqOptions = {
       hostname: 'api.resend.com',
@@ -28,7 +31,7 @@ const sendResendApi = async (options) => {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
-        'Content-Length': data.length
+        'Content-Length': Buffer.byteLength(data)
       }
     };
 
