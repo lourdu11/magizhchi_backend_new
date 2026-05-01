@@ -140,7 +140,7 @@ exports.forgotPassword = async (req, res, next) => {
         : identifier.replace(/(\d{2})\d+(\d{2})/, '$1*****$2'),
     }, isDevMode
       ? 'OTP sent! Check your server terminal for the code.'
-      : `OTP sent to your ${result.method === 'whatsapp' ? 'WhatsApp' : 'email'}.`
+      : `OTP sent successfully to your ${result.method === 'whatsapp' ? 'WhatsApp' : 'email'} at ${identifier}. Please check ${result.method === 'whatsapp' ? 'your mobile' : 'your inbox/spam folder'}.`
     );
   } catch (error) {
     next(error);
