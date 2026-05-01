@@ -94,6 +94,8 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
 </html>`;
 
   const isResend = process.env.EMAIL_HOST === 'smtp.resend.com';
+  const isBrevo = process.env.EMAIL_HOST === 'api.brevo.com';
+
   const mailOptions = {
     from,
     to: email,
@@ -107,21 +109,27 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
       logger.info('📧 Using Resend HTTP API for delivery...');
       const { sendResendApi } = require('../utils/resendApi');
       await sendResendApi(mailOptions);
+    } else if (isBrevo) {
+      logger.info('📧 Using Brevo HTTP API for delivery...');
+      const { sendBrevoApi } = require('../utils/brevoApi');
+      await sendBrevoApi(mailOptions);
     } else {
       await transporter.sendMail(mailOptions);
     }
     logger.info(`✅ Email delivered to: ${email}`);
   } catch (err) {
     logger.error(`❌ Email Failed: ${err.message}`);
-    // If it was not resend but failed, and we have resend key, try as final fallback
-    if (!isResend && process.env.EMAIL_PASSWORD?.startsWith('re_')) {
-      try {
+    // If it was not resend/brevo but failed, and we have a key, try fallback
+    const apiPass = process.env.EMAIL_PASSWORD || '';
+    if (!isResend && !isBrevo) {
+      if (apiPass.startsWith('re_')) {
         logger.info('🔄 Retrying with Resend API fallback...');
         const { sendResendApi } = require('../utils/resendApi');
-        await sendResendApi(mailOptions);
-        logger.info(`✅ Email delivered via fallback to: ${email}`);
-      } catch (retryErr) {
-        logger.error('❌ Final email fallback failed');
+        await sendResendApi(mailOptions).catch(() => {});
+      } else if (apiPass.startsWith('xkeysib-')) {
+        logger.info('🔄 Retrying with Brevo API fallback...');
+        const { sendBrevoApi } = require('../utils/brevoApi');
+        await sendBrevoApi(mailOptions).catch(() => {});
       }
     }
   }
