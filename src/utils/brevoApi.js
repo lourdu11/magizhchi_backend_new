@@ -73,9 +73,12 @@ const sendBrevoApi = async (options) => {
     });
 
     req.on('timeout', () => {
+      logger.error('❌ Brevo API Request Timed Out (10s)');
       req.destroy();
       reject(new Error('Brevo API request timed out'));
     });
+
+    req.setTimeout(10000); // 10 seconds timeout
 
     req.write(data);
     req.end();

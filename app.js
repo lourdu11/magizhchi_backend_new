@@ -171,8 +171,18 @@ app.use((req, res) => {
   res.status(404).json({ success: false, message: `Route ${req.originalUrl} not found` });
 });
 
-// ─── Global Error Handler ─────────────────────────────────────
-app.use(errorHandler);
+// ─── Global Crash Logging ──────────────────────────────────────
+process.on('uncaughtException', (err) => {
+  logger.error(`🔥 UNCAUGHT EXCEPTION: ${err.message}`);
+  logger.error(err.stack);
+  // Give logger time to write before exiting
+  setTimeout(() => process.exit(1), 1000);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error(`🔥 UNHANDLED REJECTION: ${reason}`);
+  if (reason.stack) logger.error(reason.stack);
+});
 
 // Final trigger for route migration
 module.exports = app;
