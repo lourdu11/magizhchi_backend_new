@@ -68,6 +68,7 @@ app.use(helmet());
 app.use(cors({
   origin: [
     'https://magizhchigarments.vercel.app',
+    /^https:\/\/magizhchigarments-.*\.vercel\.app$/,
     'http://localhost:3000',
     'http://localhost:5173'
   ],
