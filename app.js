@@ -64,7 +64,16 @@ app.set('trust proxy', 1); // Trust Render proxy for rate limiting
 
 
 // ─── Security Middleware ───────────────────────────────────────
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      "frame-src": ["'self'", "https://www.google.com", "https://*.google.com"],
+      "script-src": ["'self'", "'unsafe-inline'", "https://www.google.com", "https://*.google.com", "https://*.gstatic.com"],
+      "img-src": ["'self'", "data:", "https://ik.imagekit.io", "https://res.cloudinary.com", "https://*.google.com"],
+    },
+  },
+}));
 app.use(cors({
   origin: [
     'https://magizhchigarments.vercel.app',

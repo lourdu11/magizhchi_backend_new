@@ -9,7 +9,7 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
   try {
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || process.env.STORE_NAME || 'Magizhchi Garments';
-    const fromEmail = settings?.store?.email || process.env.EMAIL_USER || 'lncoderise@gmail.com';
+    const fromEmail = settings?.store?.email || process.env.EMAIL_FROM || process.env.EMAIL_USER || 'info@magizhchi.com';
     const from = `${storeName} <${fromEmail}>`;
 
     const purposes = {
@@ -24,7 +24,14 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
     const apiPass = (process.env.EMAIL_PASSWORD || '').trim();
     const isBrevo = apiPass.startsWith('xkeysib-') || apiPass.startsWith('xsmtpsib-') || process.env.EMAIL_HOST === 'api.brevo.com';
 
-    const mailOptions = { from, to: email, subject: `${meta.subject} — ${storeName}`, html };
+    const mailOptions = { 
+      from, 
+      fromEmail, 
+      fromName: storeName,
+      to: email, 
+      subject: `${meta.subject} — ${storeName}`, 
+      html 
+    };
 
     if (isBrevo) {
       logger.info('📧 Using Brevo API...');
