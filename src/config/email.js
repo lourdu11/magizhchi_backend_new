@@ -12,10 +12,12 @@ const getTransporter = async () => {
     const config = settings?.notifications?.email;
 
     // Use DB settings if fully configured (host, user, and non-empty password)
+    const isGmail = config.user?.endsWith('@gmail.com');
     if (config?.host && config?.user && config?.password && config.password.trim() !== '') {
       logger.info(`📧 Email: Using Database settings (Host: ${config.host})`);
       return nodemailer.createTransport({
-        host: config.host,
+        service: isGmail ? 'gmail' : undefined,
+        host: isGmail ? undefined : config.host,
         port: parseInt(config.port || '587'),
         secure: parseInt(config.port) === 465,
         auth: {
@@ -24,7 +26,9 @@ const getTransporter = async () => {
         },
         tls: {
           rejectUnauthorized: false
-        }
+        },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000
       });
     }
 
@@ -44,8 +48,11 @@ const getTransporter = async () => {
       });
     }
 
+    const isGmail = envUser?.endsWith('@gmail.com');
+
     return nodemailer.createTransport({
-      host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+      service: isGmail ? 'gmail' : undefined,
+      host: isGmail ? undefined : (process.env.EMAIL_HOST || 'smtp.gmail.com'),
       port: parseInt(process.env.EMAIL_PORT || '587'),
       secure: process.env.EMAIL_SECURE === 'true' || process.env.EMAIL_PORT === '465',
       auth: {
@@ -54,7 +61,10 @@ const getTransporter = async () => {
       },
       tls: {
         rejectUnauthorized: false
-      }
+      },
+      connectionTimeout: 10000, // 10s
+      greetingTimeout: 10000,   // 10s
+      socketTimeout: 20000      // 20s
     });
   } catch (err) {
     logger.error('Error creating email transporter:', err);
