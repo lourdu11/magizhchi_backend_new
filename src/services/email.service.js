@@ -44,35 +44,40 @@ async function sendUniversalEmail(mailOptions) {
   };
 
   try {
+    logger.info('🔍 Routing check: isResend=' + isResend + ', isBrevo=' + isBrevo);
     if (isResend) {
-      logger.info(`📧 Resend API: Dispatching [${finalOptions.subject}] to ${finalOptions.to}`);
+      logger.info('📧 Using Resend HTTP API for delivery...');
       const { sendResendApi } = require('../utils/resendApi');
       return await sendResendApi(finalOptions);
     } 
     
     if (isBrevo) {
-      logger.info(`📧 Brevo API: Dispatching [${finalOptions.subject}] to ${finalOptions.to}`);
+      logger.info('📧 Using Brevo HTTP API for delivery...');
       const { sendBrevoApi } = require('../utils/brevoApi');
       return await sendBrevoApi(finalOptions);
     }
 
     // Default: SMTP
-    logger.info(`📧 SMTP: Dispatching [${finalOptions.subject}] to ${finalOptions.to}`);
+    logger.info('📧 Attempting SMTP delivery...');
     const transporter = await getTransporter();
+    if (!transporter) throw new Error('SMTP Transporter not initialized');
     return await transporter.sendMail(finalOptions);
 
   } catch (err) {
-    logger.error(`❌ Email Failed: ${err.message}`);
+    logger.error('‼️ Email Service CRASHED:', {
+      message: err.message,
+      stack: err.stack,
+      options: { to: finalOptions.to, subject: finalOptions.subject }
+    });
     
     // Auto-fallback if SMTP failed but we have an API key
     if (!isResend && !isBrevo) {
+      logger.info('🔄 Attempting fallback routing...');
       if (apiPass.startsWith('re_')) {
-        logger.info('🔄 Fallback: Attempting Resend API...');
         const { sendResendApi } = require('../utils/resendApi');
         return await sendResendApi(finalOptions).catch(e => logger.error(`Fallback failed (Resend): ${e.message}`));
       } 
       if (apiPass.startsWith('xkeysib-') || apiPass.startsWith('xsmtpsib-')) {
-        logger.info('🔄 Fallback: Attempting Brevo API...');
         const { sendBrevoApi } = require('../utils/brevoApi');
         return await sendBrevoApi(finalOptions).catch(e => logger.error(`Fallback failed (Brevo): ${e.message}`));
       }
