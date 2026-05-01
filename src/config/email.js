@@ -31,7 +31,8 @@ const getTransporter = async () => {
         greetingTimeout: 20000,
         debug: true,
         logger: true,
-        family: 4
+        family: 4,
+        localAddress: '0.0.0.0'
       });
     }
 
@@ -70,7 +71,8 @@ const getTransporter = async () => {
       socketTimeout: 30000,
       debug: true,
       logger: true,
-      family: 4 
+      family: 4,
+      localAddress: '0.0.0.0' // Force outbound to use IPv4 local address
     });
   } catch (err) {
     logger.error('Error creating email transporter:', err);
