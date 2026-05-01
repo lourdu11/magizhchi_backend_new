@@ -54,8 +54,9 @@ const sendBrevoApi = async (options) => {
           resolve(data);
         },
         (error) => {
-          const errorMsg = error.response?.text || error.message;
-          logger.error(`❌ Brevo SDK Error: ${errorMsg}`);
+          // Log the full error for deep analysis
+          logger.error('❌ Brevo SDK Detailed Error:', JSON.stringify(error, null, 2));
+          const errorMsg = error.response?.text || error.body?.message || error.message;
           reject(new Error(`Brevo SDK Error: ${errorMsg}`));
         }
       );

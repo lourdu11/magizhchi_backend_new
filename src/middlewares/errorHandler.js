@@ -38,10 +38,14 @@ const errorHandler = (err, req, res, next) => {
     logger.error(`${req.method} ${req.path} - ${statusCode}: ${err.stack || message}`);
   }
 
+  // Ensure CORS headers are present even on errors
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Credentials', 'true');
+
   res.status(statusCode).json({
     success: false,
     message,
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
+    stack: process.env.NODE_ENV === 'production' ? '🥞' : err.stack,
   });
 };
 
