@@ -77,14 +77,13 @@ const verifyEmailConfig = async () => {
     logger.info('📧 Email: Verifying SMTP configuration...');
     const transporter = await getTransporter();
     
-    // Set a timeout for verification to avoid hanging
-    const timeout = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('SMTP Verification Timeout (30s)')), 30000)
-    );
+    // Run verification in the background so it doesn't block startup
+    transporter.verify().then(() => {
+      logger.info('✅ Email Ready: [SMTP Connected]');
+    }).catch(err => {
+      logger.error(`❌ Email Error: ${err.message}`);
+    });
     
-    await Promise.race([transporter.verify(), timeout]);
-    
-    logger.info('✅ Email Ready: [SMTP Connected]');
     return true;
   } catch (err) {
     logger.error(`❌ Email Error: ${err.message}`);
