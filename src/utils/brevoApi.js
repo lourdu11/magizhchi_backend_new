@@ -7,10 +7,16 @@ const logger = require('./logger');
  */
 const sendBrevoApi = async (options) => {
   return new Promise((resolve, reject) => {
-    const apiKey = (process.env.EMAIL_PASSWORD || '').trim();
+    const apiKey = (process.env.BREVO_API_KEY || process.env.EMAIL_PASSWORD || '').trim();
     if (!apiKey) {
-      return reject(new Error('Brevo API Key (EMAIL_PASSWORD) is missing'));
+      return reject(new Error('Brevo API Key (BREVO_API_KEY or EMAIL_PASSWORD) is missing'));
     }
+
+    // Log masked key for verification
+    const maskedKey = apiKey.length > 10 
+      ? `${apiKey.substring(0, 4)}...${apiKey.substring(apiKey.length - 4)}`
+      : 'INVALID_SHORT_KEY';
+    logger.info(`📧 Brevo API: Using Key [${maskedKey}]`);
 
     const fromEmail = options.fromEmail || process.env.EMAIL_FROM || process.env.EMAIL_USER;
     const fromName = options.fromName || process.env.STORE_NAME || 'Magizhchi Garments';
@@ -43,6 +49,7 @@ const sendBrevoApi = async (options) => {
       headers: {
         'accept': 'application/json',
         'api-key': apiKey,
+        'x-sib-api-key': apiKey,
         'content-type': 'application/json',
         'content-length': Buffer.byteLength(data)
       }
