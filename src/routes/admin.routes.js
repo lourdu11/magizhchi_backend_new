@@ -52,5 +52,6 @@ r.post('/inventory/reconcile', auditController.reconcileStock);
 // Settings & Config
 r.get('/settings', c.getSettings);
 r.put('/settings', c.updateSettings);
+r.post('/test-notifications', c.testNotifications);
 
 module.exports = r;

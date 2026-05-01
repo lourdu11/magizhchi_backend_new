@@ -11,6 +11,7 @@ const pino = require('pino');
 const fs = require('fs');
 const logger = require('../utils/logger');
 const Settings = require('../models/Settings');
+const WhatsAppSession = require('../models/WhatsAppSession');
 
 let sock = null;
 let isReady = false;
@@ -88,42 +89,77 @@ const closeWhatsApp = async () => {
     removeLock();
 };
 
+const saveSessionToDb = async () => {
+    try {
+        const sessionPath = path.resolve(__dirname, '../../.whatsapp-session/baileys-auth');
+        if (!fs.existsSync(sessionPath)) return;
+
+        const files = fs.readdirSync(sessionPath);
+        const sessionData = {};
+
+        for (const file of files) {
+            if (file.endsWith('.json')) {
+                const content = fs.readFileSync(path.join(sessionPath, file), 'utf8');
+                sessionData[file] = content;
+            }
+        }
+
+        await WhatsAppSession.findOneAndUpdate(
+            { key: 'baileys-auth' },
+            { data: JSON.stringify(sessionData) },
+            { upsert: true, new: true }
+        );
+        logger.debug('💾 WhatsApp: Session synced to MongoDB');
+    } catch (err) {
+        logger.error('❌ WhatsApp: Failed to sync session to MongoDB:', err.message);
+    }
+};
+
+const restoreSessionFromDb = async () => {
+    try {
+        const sessionPath = path.resolve(__dirname, '../../.whatsapp-session/baileys-auth');
+        if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
+
+        const session = await WhatsAppSession.findOne({ key: 'baileys-auth' });
+        if (!session) {
+            logger.info('📱 WhatsApp: No existing session found in MongoDB');
+            return false;
+        }
+
+        const sessionData = JSON.parse(session.data);
+        for (const [file, content] of Object.entries(sessionData)) {
+            fs.writeFileSync(path.join(sessionPath, file), content, 'utf8');
+        }
+        logger.info('✅ WhatsApp: Session restored from MongoDB');
+        return true;
+    } catch (err) {
+        logger.error('❌ WhatsApp: Failed to restore session from MongoDB:', err.message);
+        return false;
+    }
+};
+
 const initWhatsApp = async () => {
     const now = Date.now();
     
-    // 1. Singleton Lock Check (Prevents multiple processes)
+    // 1. Singleton Lock Check
     const existingPid = checkLock();
     if (existingPid) {
-        logger.error(`🚨 WhatsApp Conflict: Another instance (PID ${existingPid}) is already controlling the socket.`);
-        logger.error('👉 If that process is stuck, kill it manually or delete the .whatsapp.lock file.');
+        logger.warn(`📱 WhatsApp: Instance already running (PID ${existingPid})`);
         return;
     }
 
     // 2. Cooldown check
-    if (isInitializing || (now - lastInitTime < 10000)) {
-        if (isInitializing) logger.debug('📱 WhatsApp: Already initializing, skipping...');
-        return;
-    }
+    if (isInitializing || (now - lastInitTime < 10000)) return;
     
     isInitializing = true;
     lastInitTime = now;
     createLock();
 
-    // If there's an existing socket, close it first
-    if (sock) {
-        logger.info('📱 WhatsApp: Ensuring previous socket is closed...');
-        try {
-            sock.ev.removeAllListeners();
-            sock.end();
-        } catch (e) {}
-        sock = null;
-        await new Promise(resolve => setTimeout(resolve, 3000));
-    }
+    // 3. Restore from MongoDB before starting
+    await restoreSessionFromDb();
 
     const sessionPath = path.resolve(__dirname, '../../.whatsapp-session/baileys-auth');
     if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
-
-    logger.info('📱 WhatsApp: Initializing Pure Socket Client (Baileys)...');
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const { version } = await fetchLatestBaileysVersion();
@@ -136,72 +172,42 @@ const initWhatsApp = async () => {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Magizhchi ERP', 'Chrome', '110.0.0'], // More unique browser name
-        syncFullHistory: false, // Don't sync old messages to reduce conflict chance
-        markOnlineOnConnect: false, // Don't mark as online immediately
-        connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 0,
-        keepAliveIntervalMs: 60000, // Increase keep-alive
+        browser: ['Magizhchi ERP', 'Chrome', '110.0.0'],
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+        await saveCreds();
+        await saveSessionToDb(); // Sync to MongoDB whenever creds change
+    });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
             currentQR = qr;
-            logger.info('📱 WhatsApp: [NEW QR CODE] Scan the LATEST link below:');
-            qrcode.generate(qr, { small: true });
-            
             const qrLink = `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}&size=300x300`;
-            logger.info(`🔗 LATEST QR LINK: ${qrLink}`);
+            logger.info(`🔗 WhatsApp QR: ${qrLink}`);
         }
 
         if (connection === 'close') {
             const errorCode = lastDisconnect?.error?.output?.statusCode;
-            const errorMsg = lastDisconnect?.error?.message || 'Unknown Error';
-            
-            // If logged out or credentials invalid, clear session to force new QR
-            if (errorCode === DisconnectReason.loggedOut || errorCode === 401) {
-                logger.warn('🚫 WhatsApp: Session expired or logged out. Clearing session files...');
-                const sessionPath = path.resolve(__dirname, '../../.whatsapp-session/baileys-auth');
-                if (fs.existsSync(sessionPath)) {
-                    fs.rmSync(sessionPath, { recursive: true, force: true });
-                }
-                isReady = false;
-                isInitializing = false;
-                initWhatsApp(); // Restart to get new QR
-                return;
-            }
-
             const shouldReconnect = errorCode !== DisconnectReason.loggedOut;
-            logger.warn(`⚠️ WhatsApp: Connection closed. Reason: ${errorMsg} (Code: ${errorCode}). Reconnecting: ${shouldReconnect}`);
             
             isReady = false;
             isInitializing = false;
             
             if (shouldReconnect) {
-                // If it's a conflict (440, 428), another instance is likely running.
-                // We wait much longer to allow the other instance to timeout or close.
-                const delay = (errorCode === 440 || errorCode === 428) ? 30000 : 10000;
-                
-                if (errorCode === 440 || errorCode === 428) {
-                    logger.error(`🚨 WhatsApp CONFLICT (Code ${errorCode}): Another instance is active.`);
-                    logger.error('👉 Please close ALL other terminal windows and wait for this instance to repair.');
-                }
-
-                logger.info(`🔄 WhatsApp: Auto-repair cooldown (${delay/1000}s)...`);
-                
-                if (reconnectTimeout) clearTimeout(reconnectTimeout);
-                reconnectTimeout = setTimeout(() => {
-                    initWhatsApp();
-                }, delay);
+                setTimeout(() => initWhatsApp(), 10000);
+            } else {
+                // Logged out: Clear everything
+                WhatsAppSession.deleteOne({ key: 'baileys-auth' }).catch(() => {});
+                if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
             }
         } else if (connection === 'open') {
             isReady = true;
             isInitializing = false;
-            logger.info('✅ WhatsApp Ready: [Socket Connected]');
+            logger.info('✅ WhatsApp Connected');
+            saveSessionToDb(); // Initial sync on success
         }
     });
 

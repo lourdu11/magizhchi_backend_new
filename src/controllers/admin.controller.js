@@ -664,3 +664,54 @@ exports.getPublicSettings = async (req, res, next) => {
     return ApiResponse.success(res, response);
   } catch (error) { next(error); }
 };
+exports.testNotifications = async (req, res, next) => {
+  try {
+    const { type = 'all', phone, email } = req.body;
+    const results = { whatsapp: null, email: null };
+    const logger = require('../utils/logger');
+    const whatsapp = require('../services/whatsapp.service');
+    const emailService = require('../services/email.service');
+
+    const testMsg = `🧪 *Magizhchi Notification Test*\nSent at: ${new Date().toLocaleString()}\nStatus: Active`;
+
+    // 1. Test WhatsApp
+    if (type === 'all' || type === 'whatsapp') {
+      try {
+        const targetPhone = phone || (await Settings.findOne())?.notifications?.whatsapp?.adminPhone || process.env.STORE_PHONE;
+        if (!targetPhone) throw new Error('No target phone number provided or found in settings');
+        
+        await whatsapp.sendMessage(targetPhone, testMsg);
+        results.whatsapp = { success: true, message: `Test message sent to ${targetPhone}` };
+      } catch (err) {
+        results.whatsapp = { success: false, error: err.message };
+        logger.error('🧪 WhatsApp Test Failed:', err.message);
+      }
+    }
+
+    // 2. Test Email
+    if (type === 'all' || type === 'email') {
+      try {
+        const targetEmail = email || (await Settings.findOne())?.notifications?.email?.alertEmail || process.env.EMAIL_USER;
+        if (!targetEmail) throw new Error('No target email address provided or found in settings');
+
+        const { getTransporter } = require('../config/email');
+        const transporter = await getTransporter();
+        const { from } = await require('../services/email.service').getEmailSettings();
+
+        await transporter.sendMail({
+          from,
+          to: targetEmail,
+          subject: '🧪 Magizhchi Notification Test',
+          text: `This is a test email to verify your SMTP settings.\nSent at: ${new Date().toLocaleString()}`,
+          html: `<h3>🧪 Magizhchi Notification Test</h3><p>Your SMTP settings are working correctly.</p><p>Sent at: ${new Date().toLocaleString()}</p>`
+        });
+        results.email = { success: true, message: `Test email sent to ${targetEmail}` };
+      } catch (err) {
+        results.email = { success: false, error: err.message };
+        logger.error('🧪 Email Test Failed:', err.message);
+      }
+    }
+
+    return ApiResponse.success(res, results, 'Notification tests completed');
+  } catch (error) { next(error); }
+};
