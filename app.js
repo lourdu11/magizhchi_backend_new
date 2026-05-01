@@ -96,7 +96,11 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(compression());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  maxAge: '30d', // 1 month caching
+  etag: true,
+  lastModified: true
+}));
 
 // ─── Logging ──────────────────────────────────────────────────
 if (process.env.NODE_ENV !== 'test') {
