@@ -7,15 +7,17 @@ const logger = require('./logger');
  */
 const sendBrevoApi = async (options) => {
   return new Promise((resolve, reject) => {
-    const apiKey = process.env.EMAIL_PASSWORD; // We will use this for the API Key
+    const apiKey = process.env.EMAIL_PASSWORD ? process.env.EMAIL_PASSWORD.trim() : null;
     if (!apiKey) {
       return reject(new Error('Brevo API Key (EMAIL_PASSWORD) is missing'));
     }
 
+    logger.info(`📧 Brevo API: Sending to ${options.to}...`);
+
     const data = JSON.stringify({
       sender: { 
         name: 'Magizhchi Garments', 
-        email: 'lncoderise@gmail.com' // This must be your verified sender email in Brevo
+        email: process.env.EMAIL_FROM || 'lncoderise@gmail.com'
       },
       to: [{ email: options.to }],
       subject: options.subject,

@@ -104,6 +104,8 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
     text: `Your OTP for ${meta.action} is: ${otp}\n\nValid for ${expireMin} minutes.\nDo not share this with anyone.`,
   };
 
+  logger.info(`📧 Email Service: Sending [${meta.subject}] to ${email}`);
+
   try {
     if (isResend) {
       logger.info('📧 Using Resend HTTP API for delivery...');
