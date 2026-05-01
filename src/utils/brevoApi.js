@@ -1,94 +1,68 @@
-const https = require('https');
+const SibApiV3Sdk = require('sib-api-v3-sdk');
 const logger = require('./logger');
 
 /**
- * Sends an email using the Brevo (Sendinblue) HTTP API.
- * This is the most reliable way on Render.
+ * Sends an email using the official Brevo SDK.
+ * This matches the user's provided reference and ensures reliable delivery.
  */
 const sendBrevoApi = async (options) => {
   return new Promise((resolve, reject) => {
-    const apiKey = (process.env.BREVO_API_KEY || process.env.EMAIL_PASSWORD || '').trim();
-    if (!apiKey) {
-      return reject(new Error('Brevo API Key (BREVO_API_KEY or EMAIL_PASSWORD) is missing'));
-    }
-
-    // Log masked key for verification
-    const maskedKey = apiKey.length > 10 
-      ? `${apiKey.substring(0, 4)}...${apiKey.substring(apiKey.length - 4)}`
-      : 'INVALID_SHORT_KEY';
-    logger.info(`📧 Brevo API: Using Key [${maskedKey}]`);
-
-    const fromEmail = options.fromEmail || process.env.EMAIL_FROM || process.env.EMAIL_USER;
-    const fromName = options.fromName || process.env.STORE_NAME || 'Magizhchi Garments';
-
-    // Handle multiple recipients (split by comma if string)
-    const toList = String(options.to)
-      .split(',')
-      .map(e => ({ email: e.trim() }))
-      .filter(e => e.email && e.email.includes('@'));
-
-    if (toList.length === 0) {
-      return reject(new Error(`No valid recipients found in: ${options.to}`));
-    }
-
-    logger.info(`📧 Brevo API: Sending [${options.subject}] to ${toList.length} recipient(s)...`);
-
-    const data = JSON.stringify({
-      sender: { name: fromName, email: fromEmail },
-      to: toList,
-      subject: options.subject,
-      htmlContent: options.html,
-      textContent: options.text || ''
-    });
-
-    const reqOptions = {
-      hostname: 'api.brevo.com',
-      port: 443,
-      path: '/v3/smtp/email',
-      method: 'POST',
-      headers: {
-        'accept': 'application/json',
-        'api-key': apiKey,
-        'x-sib-api-key': apiKey,
-        'content-type': 'application/json',
-        'content-length': Buffer.byteLength(data)
+    try {
+      const defaultClient = SibApiV3Sdk.ApiClient.instance;
+      const apiKey = defaultClient.authentications['api-key'];
+      
+      const key = (process.env.BREVO_API_KEY || process.env.EMAIL_PASSWORD || '').trim();
+      if (!key) {
+        return reject(new Error('Brevo API Key (BREVO_API_KEY or EMAIL_PASSWORD) is missing'));
       }
-    };
+      
+      apiKey.apiKey = key;
 
-    const req = https.request(reqOptions, (res) => {
-      let responseData = '';
-      res.on('data', (chunk) => { responseData += chunk; });
-      res.on('end', () => {
-        try {
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            logger.info(`✅ Brevo API Success: ${toList.map(t => t.email).join(', ')}`);
-            resolve(responseData ? JSON.parse(responseData) : { success: true });
-          } else {
-            logger.error(`❌ Brevo API Error (${res.statusCode}): ${responseData}`);
-            reject(new Error(`Brevo API Error (${res.statusCode}): ${responseData}`));
-          }
-        } catch (parseErr) {
-          logger.error(`❌ Brevo API Parse Error: ${parseErr.message} | Raw: ${responseData}`);
-          reject(new Error('Failed to parse Brevo API response'));
+      // Log masked key for verification
+      const maskedKey = key.length > 10 
+        ? `${key.substring(0, 4)}...${key.substring(key.length - 4)}`
+        : 'INVALID_SHORT_KEY';
+      logger.info(`📧 Brevo SDK: Using Key [${maskedKey}]`);
+
+      const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
+      const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+
+      const fromEmail = options.fromEmail || process.env.EMAIL_FROM || process.env.EMAIL_USER;
+      const fromName = options.fromName || process.env.STORE_NAME || 'Magizhchi Garments';
+
+      // Handle multiple recipients
+      const toList = String(options.to)
+        .split(',')
+        .map(e => ({ email: e.trim() }))
+        .filter(e => e.email && e.email.includes('@'));
+
+      if (toList.length === 0) {
+        return reject(new Error(`No valid recipients found in: ${options.to}`));
+      }
+
+      sendSmtpEmail.sender = { name: fromName, email: fromEmail };
+      sendSmtpEmail.to = toList;
+      sendSmtpEmail.subject = options.subject;
+      sendSmtpEmail.htmlContent = options.html;
+      sendSmtpEmail.textContent = options.text || '';
+
+      logger.info(`📧 Brevo SDK: Sending [${options.subject}] to ${toList.length} recipient(s)...`);
+
+      apiInstance.sendTransacEmail(sendSmtpEmail).then(
+        (data) => {
+          logger.info(`✅ Brevo SDK Success: ${toList.map(t => t.email).join(', ')}`);
+          resolve(data);
+        },
+        (error) => {
+          const errorMsg = error.response?.text || error.message;
+          logger.error(`❌ Brevo SDK Error: ${errorMsg}`);
+          reject(new Error(`Brevo SDK Error: ${errorMsg}`));
         }
-      });
-    });
-
-    req.on('error', (err) => {
-      logger.error(`❌ Brevo API Request Failed: ${err.message}`);
+      );
+    } catch (err) {
+      logger.error(`🔥 Brevo SDK Fatal Error: ${err.message}`);
       reject(err);
-    });
-
-    req.on('timeout', () => {
-      logger.error('❌ Brevo API Request Timed Out (10s)');
-      req.destroy();
-      reject(new Error('Brevo API request timed out'));
-    });
-
-    req.setTimeout(10000); // 10 seconds timeout
-
-    req.write(data);
-    req.end();
+    }
   });
 };
 
