@@ -1,0 +1,178 @@
+require('dotenv').config();
+const express = require('express');
+const path = require('path');
+
+// ─── Environment Validation (Fail-Fast) ────────────────────────
+const requiredEnvs = ['MONGODB_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'FRONTEND_URL'];
+const placeholders = ['CHANGE_IN_PROD', 'your_gmail', 'placeholder'];
+
+requiredEnvs.forEach(env => {
+  if (!process.env[env] || placeholders.some(p => process.env[env].includes(p))) {
+    console.error(`\n❌ CRITICAL ERROR: Environment variable "${env}" is missing or contains a placeholder.`);
+    console.error(`👉 Please update your .env file or cloud environment variables before starting in production.\n`);
+    process.exit(1);
+  }
+});
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const cookieParser = require('cookie-parser');
+const compression = require('compression');
+// Lightweight NoSQL injection sanitizer (replaces express-mongo-sanitize)
+const mongoSanitize = (req, res, next) => {
+  const sanitize = (obj) => {
+    if (obj && typeof obj === 'object') {
+      Object.keys(obj).forEach(k => {
+        if (k.startsWith('$') || k.includes('.')) delete obj[k];
+        else sanitize(obj[k]);
+      });
+    }
+  };
+  sanitize(req.body);
+  sanitize(req.params);
+  next();
+};
+
+const errorHandler = require('./src/middlewares/errorHandler');
+const { defaultLimiter } = require('./src/middlewares/rateLimiter');
+const logger = require('./src/utils/logger');
+
+// Route imports
+const authRoutes = require('./src/routes/auth.routes');
+const productRoutes = require('./src/routes/product.routes');
+const categoryRoutes = require('./src/routes/category.routes');
+const cartRoutes = require('./src/routes/cart.routes');
+const wishlistRoutes = require('./src/routes/wishlist.routes');
+const orderRoutes = require('./src/routes/order.routes');
+const billRoutes = require('./src/routes/bill.routes');
+const adminRoutes = require('./src/routes/admin.routes');
+const couponRoutes = require('./src/routes/coupon.routes');
+const reviewRoutes = require('./src/routes/review.routes');
+const bannerRoutes = require('./src/routes/banner.routes');
+const userRoutes = require('./src/routes/user.routes');
+const publicRoutes = require('./src/routes/public.routes');
+const publicController = require('./src/controllers/public.controller');
+const upload = require('./src/middlewares/upload.middleware');
+const { protect, isAdmin } = require('./src/middlewares/auth');
+// settingsRoutes removed as it is now part of adminRoutes
+
+
+
+
+const app = express();
+
+
+// ─── Security Middleware ───────────────────────────────────────
+app.use(helmet());
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (Postman, mobile apps, curl)
+    if (!origin) return callback(null, true);
+
+    const allowedOrigins = [
+      process.env.FRONTEND_URL,
+      'http://localhost:3000',
+      'http://localhost:5173',
+    ].filter(Boolean);
+
+    // In development: allow any localhost port
+    if (process.env.NODE_ENV !== 'production' && /^http:\/\/localhost:\d+$/.test(origin)) {
+      return callback(null, true);
+    }
+
+    // Allow any Vercel deployment
+    if (origin.endsWith('.vercel.app') || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    callback(new Error(`CORS: Origin ${origin} not allowed`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-rtb-fingerprint-id', 'request-id'],
+  exposedHeaders: ['x-rtb-fingerprint-id', 'request-id'],
+}));
+
+app.use(mongoSanitize); // Prevent NoSQL injection
+
+// ─── Body Parsing ─────────────────────────────────────────────
+// Raw body for Razorpay webhook signature verification
+app.use('/api/v1/payments/webhook', express.raw({ type: 'application/json' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(cookieParser());
+app.use(compression());
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// ─── Logging ──────────────────────────────────────────────────
+if (process.env.NODE_ENV !== 'test') {
+  app.use(morgan('combined', {
+    stream: { write: (msg) => logger.info(msg.trim()) },
+  }));
+}
+
+// ─── Global Rate Limiter ──────────────────────────────────────
+app.use('/api', defaultLimiter);
+
+// ─── Health Check ─────────────────────────────────────────────
+app.get('/', (req, res) => {
+  res.json({ success: true, message: 'Welcome to Magizhchi API' });
+});
+
+app.get('/api/v1/health', (req, res) => {
+  const { isReady, getQRLink } = require('./src/services/whatsapp.service');
+  const ready = isReady();
+  res.json({ 
+    success: true, 
+    message: 'Magizhchi API is running', 
+    whatsapp: ready ? 'Ready' : 'Not Connected',
+    qrLink: !ready ? getQRLink() : null,
+    timestamp: new Date().toISOString() 
+  });
+});
+
+// ─── API Routes ───────────────────────────────────────────────
+const API = '/api/v1';
+
+// VIP Priority Routes (Procurement & Scanning)
+app.use(`${API}/admin/inventory`, protect, isAdmin, require('./src/routes/inventory.routes'));
+app.use(`${API}/admin`, adminRoutes);
+
+app.use(`${API}/public`, publicRoutes);
+app.post(`${API}/contact`, publicController.submitContactForm); 
+app.use(`${API}/auth`, authRoutes);
+app.use(`${API}/products`, productRoutes);
+app.use(`${API}/categories`, categoryRoutes);
+app.use(`${API}/cart`, cartRoutes);
+app.use(`${API}/wishlist`, wishlistRoutes);
+app.use(`${API}/orders`, orderRoutes);
+app.use(`${API}/payments`, require('./src/routes/payment.routes'));
+app.use(`${API}/bills`, billRoutes);
+app.use(`${API}/coupons`, couponRoutes);
+app.use(`${API}/reviews`, reviewRoutes);
+app.use(`${API}/banners`, bannerRoutes);
+app.use(`${API}/users`, userRoutes);
+
+// Debug route to verify route health
+app.get(`${API}/health/procurement`, (req, res) => res.json({ status: 'active', routes: ['admin/purchases', 'admin/suppliers'] }));
+
+// ─── Utility Routes ───────────────────────────────────────────
+app.post(`${API}/upload`, protect, isAdmin, upload.single('image'), (req, res) => {
+  if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
+  res.json({ success: true, url: req.file.path });
+});
+// settings handled in admin routes
+
+
+
+
+// ─── 404 Handler ──────────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: `Route ${req.originalUrl} not found` });
+});
+
+// ─── Global Error Handler ─────────────────────────────────────
+app.use(errorHandler);
+
+// Final trigger for route migration
+module.exports = app;
