@@ -180,7 +180,7 @@ const initWhatsApp = async () => {
         await saveSessionToDb(); // Sync to MongoDB whenever creds change
     });
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -191,12 +191,20 @@ const initWhatsApp = async () => {
 
         if (connection === 'close') {
             const errorCode = lastDisconnect?.error?.output?.statusCode;
-            const shouldReconnect = errorCode !== DisconnectReason.loggedOut;
+            const errorMsg = lastDisconnect?.error?.message || '';
+            const isBadSession = errorCode === 401 || errorMsg.includes('Bad MAC') || errorMsg.includes('encryption');
+            
+            const shouldReconnect = errorCode !== DisconnectReason.loggedOut && !isBadSession;
             
             isReady = false;
             isInitializing = false;
             
-            if (shouldReconnect) {
+            if (isBadSession) {
+                logger.error('🚨 WhatsApp: Corrupt session detected (Bad MAC). Clearing session for safety...');
+                await WhatsAppSession.deleteOne({ key: 'baileys-auth' }).catch(() => {});
+                if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
+                setTimeout(() => initWhatsApp(), 5000);
+            } else if (shouldReconnect) {
                 setTimeout(() => initWhatsApp(), 10000);
             } else {
                 // Logged out: Clear everything
