@@ -77,11 +77,16 @@ const verifyEmailConfig = async () => {
     logger.info('📧 Email: Verifying SMTP configuration...');
     const transporter = await getTransporter();
     
-    // Run verification in the background so it doesn't block startup
+    // Run verification in the background
     transporter.verify().then(() => {
       logger.info('✅ Email Ready: [SMTP Connected]');
     }).catch(err => {
-      logger.error(`❌ Email Error: ${err.message}`);
+      // If we are using Resend, we don't care about SMTP errors because we use the API
+      if (process.env.EMAIL_HOST === 'smtp.resend.com') {
+        logger.info('ℹ️  SMTP port blocked, but Resend API is active. Emails will still work.');
+      } else {
+        logger.error(`❌ Email Error: ${err.message}`);
+      }
     });
     
     return true;

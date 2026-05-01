@@ -104,21 +104,24 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
 
   try {
     if (isResend) {
+      logger.info('📧 Using Resend HTTP API for delivery...');
       const { sendResendApi } = require('../utils/resendApi');
       await sendResendApi(mailOptions);
     } else {
       await transporter.sendMail(mailOptions);
     }
-    logger.info(`OTP email sent to: ${email} [purpose: ${purpose}]`);
+    logger.info(`✅ Email delivered to: ${email}`);
   } catch (err) {
     logger.error(`❌ Email Failed: ${err.message}`);
     // If it was not resend but failed, and we have resend key, try as final fallback
     if (!isResend && process.env.EMAIL_PASSWORD?.startsWith('re_')) {
       try {
+        logger.info('🔄 Retrying with Resend API fallback...');
         const { sendResendApi } = require('../utils/resendApi');
         await sendResendApi(mailOptions);
+        logger.info(`✅ Email delivered via fallback to: ${email}`);
       } catch (retryErr) {
-        logger.error('Final email fallback failed');
+        logger.error('❌ Final email fallback failed');
       }
     }
   }
