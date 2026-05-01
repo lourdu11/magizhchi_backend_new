@@ -126,7 +126,7 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
         logger.info('🔄 Retrying with Resend API fallback...');
         const { sendResendApi } = require('../utils/resendApi');
         await sendResendApi(mailOptions).catch(() => {});
-      } else if (apiPass.startsWith('xkeysib-')) {
+      } else if (apiPass.startsWith('xkeysib-') || apiPass.startsWith('xsmtpsib-')) {
         logger.info('🔄 Retrying with Brevo API fallback...');
         const { sendBrevoApi } = require('../utils/brevoApi');
         await sendBrevoApi(mailOptions).catch(() => {});
