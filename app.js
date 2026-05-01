@@ -101,7 +101,13 @@ app.use('/api', defaultLimiter);
 
 // ─── Health Check ─────────────────────────────────────────────
 app.get('/', (req, res) => {
+  res.set('X-Server-Location', process.env.RENDER ? 'Render-Cloud' : 'Local-Machine');
   res.json({ success: true, message: 'Welcome to Magizhchi API' });
+});
+
+app.use((req, res, next) => {
+  res.set('X-Server-Location', process.env.RENDER ? 'Render-Cloud' : 'Local-Machine');
+  next();
 });
 
 app.get('/api/v1/health', (req, res) => {
