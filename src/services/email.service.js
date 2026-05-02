@@ -85,7 +85,7 @@ const sendOrderConfirmationEmail = async (order) => {
 const sendLowStockEmail = async (product, overrideRecipient = null) => {
   try {
     const settings = await Settings.findOne().lean();
-    const adminEmail = overrideRecipient || settings?.notifications?.email?.alertEmail || 'lncoderise@gmail.com';
+    const adminEmail = overrideRecipient || settings?.notifications?.email?.alertEmail || process.env.EMAIL_USER || settings?.store?.email;
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { lowStockTemplate } = require('../utils/emailTemplates');
 
@@ -112,7 +112,7 @@ const sendLowStockEmail = async (product, overrideRecipient = null) => {
 const sendAdminOrderNotificationEmail = async (order) => {
   try {
     const settings = await Settings.findOne().lean();
-    const adminEmail = settings?.notifications?.email?.alertEmail || 'lncoderise@gmail.com';
+    const adminEmail = settings?.notifications?.email?.alertEmail || process.env.EMAIL_USER || settings?.store?.email;
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { adminOrderTemplate } = require('../utils/emailTemplates');
 
@@ -139,7 +139,7 @@ const sendAdminOrderNotificationEmail = async (order) => {
 const sendAdminContactNotificationEmail = async (contactData) => {
   try {
     const settings = await Settings.findOne().lean();
-    const adminEmail = settings?.notifications?.email?.alertEmail || 'lncoderise@gmail.com';
+    const adminEmail = settings?.notifications?.email?.alertEmail || process.env.EMAIL_USER || settings?.store?.email;
     const { generateEmailHTML } = require('../utils/emailTemplates');
 
     const body = `
