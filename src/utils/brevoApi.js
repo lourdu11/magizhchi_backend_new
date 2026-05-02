@@ -24,10 +24,11 @@ const sendBrevoApi = async (mailOptions) => {
       email: senderEmail
     },
     to: [{ email: recipientEmail }],
-    subject: mailOptions.subject,
-    htmlContent: mailOptions.html || '',
-    textContent: mailOptions.text || ''
+    subject: mailOptions.subject
   };
+
+  if (mailOptions.html) payload.htmlContent = mailOptions.html;
+  if (mailOptions.text) payload.textContent = mailOptions.text;
 
   logger.info(`📧 Brevo API → TO: ${recipientEmail}`);
 
