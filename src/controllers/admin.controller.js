@@ -801,9 +801,9 @@ exports.testNotifications = async (req, res, next) => {
     logger.info(`🧪 Test Notification results:`, results);
     
     if (emailFailed) {
-      return res.status(207).json({ success: false, message: emailFailed.error, results });
+      return res.status(207).json({ success: false, message: `FAIL: ${emailFailed.error} (V2)`, results });
     }
 
-    return ApiResponse.success(res, results, 'Test alerts sent successfully! Check your inbox.');
+    return ApiResponse.success(res, results, '✅ [V2-READY] Test alerts sent! Check inbox.');
   } catch (error) { next(error); }
 };
