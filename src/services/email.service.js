@@ -45,13 +45,10 @@ const getAdminRecipient = async () => {
 
 /**
  * Get FROM address — always from environment
+ * Force verified Brevo subdomain to prevent blocking
  */
 const getFromAddress = (storeName) => {
-  const fromEmail = process.env.EMAIL_USER;
-  if (!fromEmail) {
-    logger.error('❌ EMAIL_USER not set in environment');
-    return null;
-  }
+  const fromEmail = 'lncoderise@11134769.brevosend.com'; 
   return { from: `${storeName} <${fromEmail}>`, fromEmail };
 };
 
