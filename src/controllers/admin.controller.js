@@ -692,57 +692,108 @@ exports.getPublicSettings = async (req, res, next) => {
 };
 exports.testNotifications = async (req, res, next) => {
   try {
-    const { type = 'all', phone, email } = req.body;
-    const results = { whatsapp: null, email: null };
+    const { type = 'order' } = req.body;
+    const results = {};
     const logger = require('../utils/logger');
     const whatsapp = require('../services/whatsapp.service');
     const emailService = require('../services/email.service');
 
-    const testMsg = `🧪 *Magizhchi Notification Test*\nSent at: ${new Date().toLocaleString()}\nStatus: Active`;
+    // Always read FRESH from DB — never use stale frontend form data
+    const settings = await Settings.findOne().lean();
+    const alertEmail = settings?.notifications?.email?.alertEmail?.trim().toLowerCase();
+    logger.info(`🧪 Test Notification: type=${type}, alertEmail=${alertEmail}`);
 
-    // 1. Test WhatsApp
-    if (type === 'all' || type === 'whatsapp') {
-      try {
-        const settings = await Settings.findOne();
-        // ✅ FIXED: No env var fallback — must be configured in settings
-        const targetPhone = phone || settings?.notifications?.whatsapp?.adminPhone;
-        if (!targetPhone) throw new Error('No Admin WhatsApp number configured in Settings → Notifications');
-        
-        await whatsapp.sendMessage(targetPhone, testMsg);
-        results.whatsapp = { success: true, message: `Test message sent to ${targetPhone}` };
-      } catch (err) {
-        results.whatsapp = { success: false, error: err.message };
-        logger.error('🧪 WhatsApp Test Failed:', err.message);
-      }
-    }
+    const dummyOrder = {
+      _id: '507f1f77bcf86cd799439011',
+      orderNumber: 'TEST-ORDER-BREVO',
+      shippingAddress: { name: 'Diagnostic Test', phone: '0000000000' },
+      pricing: { totalAmount: 1 },
+      paymentMethod: 'TEST',
+      items: [{ productName: 'Diagnostic Ping', variant: { size: 'N/A', color: 'N/A' }, quantity: 1 }]
+    };
 
-    // 2. Test Email
-    if (type === 'all' || type === 'email') {
-      try {
-        const settings = await Settings.findOne();
-        const targetEmail = settings?.notifications?.email?.alertEmail?.trim().toLowerCase();
+    const dummyContact = {
+      name: 'Magizhchi Test',
+      email: 'test.magizhchi@gmail.com',
+      phone: '9000000000',
+      subject: 'Product Inquiry',
+      message: 'Hello! I am interested in your latest garments collection. Please let me know available sizes.'
+    };
 
-        if (!targetEmail) {
-          throw new Error('No Admin Notification Email configured in Settings → Notifications');
+    // ORDER ALERT TEST
+    if (type === 'order' || type === 'all') {
+      const method = settings?.notifications?.orderNotifications?.method || 'both';
+
+      if (['whatsapp', 'both'].includes(method)) {
+        try {
+          await whatsapp.sendOrderNotificationToAdmin(dummyOrder);
+          results.whatsappOrder = { success: true, message: 'WhatsApp order alert sent' };
+        } catch (e) {
+          results.whatsappOrder = { success: false, error: e.message };
+          logger.error('Order WhatsApp Test Error:', e.message);
         }
+      }
 
-        const { getTransporter } = require('../config/email');
-        const transporter = await getTransporter();
-
-        await transporter.sendMail({
-          from: `Magizhchi Garments <${process.env.EMAIL_USER}>`,
-          to: targetEmail,
-          subject: '🧪 Magizhchi Notification Test',
-          html: `<h3>✅ Gmail SMTP Working</h3><p>Sent at: ${new Date().toLocaleString()}</p>`
-        });
-
-        results.email = { success: true, message: `Test email sent to ${targetEmail}` };
-      } catch (err) {
-        results.email = { success: false, error: err.message };
-        logger.error('🧪 Email Test Failed:', err.message);
+      if (['email', 'both'].includes(method)) {
+        try {
+          if (!alertEmail) throw new Error('No Admin Notification Email set in Settings → Notifications tab');
+          await emailService.sendAdminOrderNotificationEmail(dummyOrder);
+          results.emailOrder = { success: true, message: `Order alert email sent to ${alertEmail}` };
+        } catch (e) {
+          results.emailOrder = { success: false, error: e.message };
+          logger.error('Order Email Test Error:', e.message);
+        }
       }
     }
 
-    return ApiResponse.success(res, results, 'Notification tests completed');
+    // CONTACT ALERT TEST
+    if (type === 'contact' || type === 'all') {
+      const method = settings?.notifications?.contactNotifications?.method || 'both';
+
+      if (['whatsapp', 'both'].includes(method)) {
+        try {
+          await whatsapp.sendContactMessageNotificationToAdmin(dummyContact);
+          results.whatsappContact = { success: true, message: 'WhatsApp contact alert sent' };
+        } catch (e) {
+          results.whatsappContact = { success: false, error: e.message };
+          logger.error('Contact WhatsApp Test Error:', e.message);
+        }
+      }
+
+      if (['email', 'both'].includes(method)) {
+        try {
+          if (!alertEmail) throw new Error('No Admin Notification Email set in Settings → Notifications tab');
+          await emailService.sendAdminContactNotificationEmail(dummyContact);
+          results.emailContact = { success: true, message: `Contact alert email sent to ${alertEmail}` };
+        } catch (e) {
+          results.emailContact = { success: false, error: e.message };
+          logger.error('Contact Email Test Error:', e.message);
+        }
+      }
+    }
+
+    // LOW STOCK TEST
+    if (type === 'stock' || type === 'all') {
+      try {
+        const { checkAndAlertLowStock } = require('../utils/lowStockAlert');
+        await checkAndAlertLowStock({
+          productName: 'TEST PRODUCT', color: 'GOLD', size: 'XL',
+          availableStock: 2, lowStockThreshold: 5
+        });
+        results.stock = { success: true, message: 'Low stock alert sent' };
+      } catch (e) {
+        results.stock = { success: false, error: e.message };
+        logger.error('Stock Test Error:', e.message);
+      }
+    }
+
+    // If any email failed, return 207 so frontend shows the error message
+    const emailFailed = Object.values(results).find(r => r && !r.success);
+    if (emailFailed) {
+      return res.status(207).json({ success: false, message: emailFailed.error, results });
+    }
+
+    return ApiResponse.success(res, results, 'Test alerts sent successfully! Check your inbox.');
   } catch (error) { next(error); }
 };
+
