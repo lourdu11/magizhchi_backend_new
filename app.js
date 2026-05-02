@@ -197,15 +197,42 @@ app.post(`${API}/upload`, protect, isAdmin, upload.single('image'), (req, res) =
 
 
 
-// ─── 404 Handler ──────────────────────────────────────────────
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: `Route ${req.originalUrl} not found` });
+// ✅ [USER REQUESTED] FORCE TEST NOTIFICATION ROUTE
+app.post('/api/v1/test-force', async (req, res) => {
+  try {
+    const SibApiV3Sdk = require('sib-api-v3-sdk');
+    const client = SibApiV3Sdk.ApiClient.instance;
+    client.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
+
+    const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
+    
+    // Get alert email from DB or fallback
+    const Settings = require('./src/models/Settings');
+    const settings = await Settings.findOne().lean();
+    const adminEmail = settings?.notifications?.email?.alertEmail || 'lncoderise@gmail.com';
+    const senderEmail = process.env.EMAIL_USER;
+
+    const result = await emailApi.sendTransacEmail({
+      sender: { name: 'Magizhchi Admin', email: senderEmail },
+      to: [{ email: adminEmail }],
+      subject: '🚨 Test Order Alert (FORCE FIX)',
+      htmlContent: `<h2>Test Notification</h2><p>This alert was triggered manually from the Admin Settings.</p><p>Sent to: ${adminEmail}</p>`
+    });
+
+    res.json({
+      success: true,
+      data: { emailOrder: { messageId: result.messageId } }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
-// ─── Global Error Handler ─────────────────────────────────────
 // Diagnostic Health Check
 app.get('/api/v1/health-v2', (req, res) => {
   try {
+    const fs = require('fs');
+    const path = require('path');
     const version = fs.readFileSync(path.join(__dirname, 'VERSION.txt'), 'utf8').trim();
     const isCorrectRepo = fs.existsSync(path.join(__dirname, 'IM_THE_CORRECT_REPO.txt'));
     res.json({ 
@@ -215,15 +242,16 @@ app.get('/api/v1/health-v2', (req, res) => {
       timestamp: new Date().toISOString() 
     });
   } catch (err) {
-    res.json({ 
-      status: 'online', 
-      version: 'V2-PENDING', 
-      error: err.message,
-      timestamp: new Date().toISOString() 
-    });
+    res.json({ status: 'online', version: 'V2-PENDING', error: err.message });
   }
 });
 
+// ─── 404 Handler ──────────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: `Route ${req.originalUrl} not found` });
+});
+
+// ─── Global Error Handler ─────────────────────────────────────
 app.use(errorHandler);
 
 // ─── Global Crash Logging ──────────────────────────────────────
