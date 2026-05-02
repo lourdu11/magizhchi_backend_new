@@ -41,6 +41,7 @@ const errorHandler = (err, req, res, next) => {
   // Ensure CORS headers are present even on errors
   res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Expose-Headers', 'x-rtb-fingerprint-id, request-id');
 
   res.status(statusCode).json({
     success: false,
