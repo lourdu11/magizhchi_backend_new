@@ -737,8 +737,10 @@ exports.testNotifications = async (req, res, next) => {
       if (['email', 'both'].includes(method)) {
         try {
           if (!alertEmail) throw new Error('No Admin Notification Email set in Settings → Notifications tab');
-          await emailService.sendAdminOrderNotificationEmail(dummyOrder);
-          results.emailOrder = { success: true, message: `Order alert email sent to ${alertEmail}` };
+          const brevoResult = await emailService.sendAdminOrderNotificationEmail(dummyOrder);
+          const messageId = brevoResult?.messageId || brevoResult?.data?.messageId || 'accepted';
+          logger.info(`✅ Order Test Email accepted by Brevo. messageId=${messageId} → ${alertEmail}`);
+          results.emailOrder = { success: true, message: `Order alert email sent to ${alertEmail}`, messageId };
         } catch (e) {
           results.emailOrder = { success: false, error: e.message };
           logger.error('Order Email Test Error:', e.message);
@@ -763,8 +765,10 @@ exports.testNotifications = async (req, res, next) => {
       if (['email', 'both'].includes(method)) {
         try {
           if (!alertEmail) throw new Error('No Admin Notification Email set in Settings → Notifications tab');
-          await emailService.sendAdminContactNotificationEmail(dummyContact);
-          results.emailContact = { success: true, message: `Contact alert email sent to ${alertEmail}` };
+          const brevoResult = await emailService.sendAdminContactNotificationEmail(dummyContact);
+          const messageId = brevoResult?.messageId || brevoResult?.data?.messageId || 'accepted';
+          logger.info(`✅ Contact Test Email accepted by Brevo. messageId=${messageId} → ${alertEmail}`);
+          results.emailContact = { success: true, message: `Contact alert email sent to ${alertEmail}`, messageId };
         } catch (e) {
           results.emailContact = { success: false, error: e.message };
           logger.error('Contact Email Test Error:', e.message);
