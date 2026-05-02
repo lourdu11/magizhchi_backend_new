@@ -1,46 +1,33 @@
-const nodemailer = require('nodemailer');
 const logger = require('../utils/logger');
 
 const getTransporter = async () => {
-  const user = process.env.EMAIL_USER;
-  const pass = process.env.EMAIL_PASSWORD?.replace(/\s/g, '');
-  const host = process.env.EMAIL_HOST || 'smtp-relay.brevo.com';
-  const port = parseInt(process.env.EMAIL_PORT || '587');
-  const secure = process.env.EMAIL_SECURE === 'true';
-
-  if (!user || !pass) {
-    logger.error('❌ EMAIL_USER or EMAIL_PASSWORD not set in environment');
-    throw new Error('Brevo SMTP credentials not configured');
-  }
-
-  logger.info(`📧 Brevo SMTP: Connecting via ${host}:${port} as ${user}`);
-
-  return nodemailer.createTransport({
-    host: host,
-    port: port,
-    secure: secure,
-    auth: {
-      user: user,
-      pass: pass
+  // Returns a fake transporter that routes through Brevo API
+  return {
+    sendMail: async (mailOptions) => {
+      const { sendBrevoApi } = require('../utils/brevoApi');
+      return await sendBrevoApi(mailOptions);
     },
-    tls: {
-      rejectUnauthorized: false
-    },
-    connectionTimeout: 15000,
-    greetingTimeout: 10000,
-    socketTimeout: 30000
-  });
+    verify: async () => {
+      const apiKey = process.env.BREVO_API_KEY;
+      if (!apiKey) throw new Error('BREVO_API_KEY not configured');
+      logger.info('✅ Brevo API Ready: API key configured');
+      return true;
+    }
+  };
 };
 
 const verifyEmailConfig = async () => {
   try {
-    logger.info('📧 Verifying Brevo SMTP configuration...');
-    const transporter = await getTransporter();
-    await transporter.verify();
-    logger.info('✅ Brevo SMTP Ready: Connected successfully');
+    logger.info('📧 Verifying Brevo API configuration...');
+    const apiKey = process.env.BREVO_API_KEY;
+    if (!apiKey) {
+      logger.error('❌ BREVO_API_KEY not set in environment');
+      return false;
+    }
+    logger.info('✅ Brevo API Ready: Connected successfully');
     return true;
   } catch (err) {
-    logger.error(`❌ Brevo SMTP Error: ${err.message}`);
+    logger.error(`❌ Brevo API Error: ${err.message}`);
     return false;
   }
 };

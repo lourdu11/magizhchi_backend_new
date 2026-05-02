@@ -5,6 +5,7 @@ const logger = require('../utils/logger');
  * Single recipient guard + Gmail SMTP dispatcher
  */
 const dispatchEmail = async (mailOptions) => {
+  // Strict single recipient guard
   if (!mailOptions.to || typeof mailOptions.to !== 'string') {
     logger.error('❌ dispatchEmail blocked: recipient missing or invalid');
     return;
@@ -15,10 +16,10 @@ const dispatchEmail = async (mailOptions) => {
   }
 
   try {
-    logger.info(`📧 Brevo SMTP → TO: ${mailOptions.to}`);
-    const { getTransporter } = require('../config/email');
-    const transporter = await getTransporter();
-    return await transporter.sendMail(mailOptions);
+    // Always use Brevo API — no SMTP
+    const { sendBrevoApi } = require('../utils/brevoApi');
+    logger.info(`📧 Brevo API dispatch → TO: ${mailOptions.to}`);
+    return await sendBrevoApi(mailOptions);
   } catch (err) {
     logger.error(`🔥 Email Dispatch Error: ${err.message}`);
     throw err;
