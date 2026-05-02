@@ -1,6 +1,43 @@
-const { getTransporter } = require('../config/email');
-const logger = require('../utils/logger');
-const Settings = require('../models/Settings');
+/**
+ * Internal helper to dispatch email using the best available method
+ */
+const dispatchEmail = async (mailOptions) => {
+  try {
+    const settings = await Settings.findOne().lean();
+    const dbEmail = settings?.notifications?.email;
+    
+    // Check if we should use Brevo API
+    const brevoApiKey = process.env.BREVO_API_KEY;
+    const smtpPassword = (dbEmail?.password || process.env.EMAIL_PASSWORD || '').trim();
+    
+    // Auto-detect Brevo (API Key in password or explicit BREVO_API_KEY env)
+    const isBrevo = 
+      brevoApiKey || 
+      smtpPassword.startsWith('xkeysib-') || 
+      process.env.EMAIL_HOST === 'api.brevo.com' ||
+      (dbEmail?.host === 'smtp-relay.brevo.com');
+
+    if (isBrevo) {
+      const { sendBrevoApi } = require('../utils/brevoApi');
+      try {
+        logger.info(`📧 Email: Dispatching via Brevo API to ${mailOptions.to}`);
+        return await sendBrevoApi(mailOptions);
+      } catch (err) {
+        logger.warn(`⚠️ Brevo API Failed: ${err.message}. Falling back to SMTP...`);
+        // Fall through to SMTP
+      }
+    }
+
+    // SMTP Fallback
+    logger.info(`📧 Email: Dispatching via SMTP to ${mailOptions.to}`);
+    const { getTransporter } = require('../config/email');
+    const transporter = await getTransporter();
+    return await transporter.sendMail(mailOptions);
+  } catch (err) {
+    logger.error(`🔥 Email Dispatch Error: ${err.message}`);
+    throw err;
+  }
+};
 
 /**
  * Sends OTP Email
@@ -9,8 +46,6 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
   try {
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || process.env.STORE_NAME || 'Magizhchi Garments';
-    
-    // Force use of verified sender for production stability
     const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com'; 
     const from = `${storeName} <${fromEmail}>`;
 
@@ -21,32 +56,16 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
     };
     const meta = purposes[purpose] || purposes.register;
 
-    const html = `<h2>${meta.title}</h2><p>Your OTP is: <b>${otp}</b></p>`;
-    
-    const apiPass = (process.env.EMAIL_PASSWORD || '').trim();
-    const isBrevo = apiPass.startsWith('xkeysib-') || apiPass.startsWith('xsmtpsib-') || process.env.EMAIL_HOST === 'api.brevo.com';
-
-    const mailOptions = { 
+    return await dispatchEmail({ 
       from, 
       fromEmail, 
       fromName: storeName,
       to: email, 
       subject: `${meta.subject} — ${storeName}`, 
-      replyTo: fromEmail,
-      html 
-    };
-
-    if (isBrevo) {
-      logger.info(`📧 Email: Using Brevo API for ${email} (From: ${fromEmail})`);
-      const { sendBrevoApi } = require('../utils/brevoApi');
-      return await sendBrevoApi(mailOptions);
-    } else {
-      logger.info(`📧 Email: Using SMTP for ${email} (Host: ${process.env.EMAIL_HOST || 'default'})`);
-      const transporter = await getTransporter();
-      return await transporter.sendMail(mailOptions);
-    }
+      html: `<h2>${meta.title}</h2><p>Your OTP is: <b>${otp}</b></p>`
+    });
   } catch (err) {
-    logger.error(`🔥 Email Service Error for ${email}: ${err.stack || err.message}`);
+    logger.error(`🔥 OTP Email Error: ${err.message}`);
     throw err;
   }
 };
@@ -62,18 +81,15 @@ const sendOrderConfirmationEmail = async (order) => {
     
     const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
     const from = `${storeName} <${fromEmail}>`;
-    const mailOptions = {
+    
+    return await dispatchEmail({
       from,
       fromEmail,
       fromName: storeName,
       to: order.guestDetails?.email || order.shippingAddress?.email || order.userId?.email,
       subject: `Order Confirmed #${order.orderNumber} — ${storeName}`,
-      replyTo: fromEmail,
-      html
-    };
-
-    const { sendBrevoApi } = require('../utils/brevoApi');
-    return await sendBrevoApi(mailOptions);
+      html: orderConfirmationTemplate(order, storeName)
+    });
   } catch (err) {
     logger.error(`🔥 Order Confirmation Email Error: ${err.message}`);
   }
@@ -87,20 +103,16 @@ const sendLowStockEmail = async (product, overrideRecipient = null) => {
     const settings = await Settings.findOne().lean();
     const adminEmail = overrideRecipient || settings?.notifications?.email?.alertEmail || process.env.EMAIL_USER || settings?.store?.email;
     const storeName = settings?.store?.name || 'Magizhchi Garments';
-    const { lowStockTemplate } = require('../utils/emailTemplates');
+    const { lowStockTemplate } = require('../utils/lowStockAlert'); // Corrected path from earlier context
 
-    const html = lowStockTemplate(product, storeName);
     const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
-    const mailOptions = {
+    return await dispatchEmail({
       from: `System Alert <${fromEmail}>`,
       fromEmail,
       to: adminEmail,
       subject: `⚠️ LOW STOCK: ${product.name}`,
-      html
-    };
-
-    const { sendBrevoApi } = require('../utils/brevoApi');
-    return await sendBrevoApi(mailOptions);
+      html: lowStockTemplate(product, storeName)
+    });
   } catch (err) {
     logger.error(`🔥 Low Stock Email Error: ${err.message}`);
   }
@@ -116,18 +128,14 @@ const sendAdminOrderNotificationEmail = async (order) => {
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { adminOrderTemplate } = require('../utils/emailTemplates');
 
-    const html = adminOrderTemplate(order, storeName);
     const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
-    const mailOptions = {
+    return await dispatchEmail({
       from: `Sales Notification <${fromEmail}>`,
       fromEmail,
       to: adminEmail,
       subject: `🎉 New Order #${order.orderNumber}`,
-      html
-    };
-
-    const { sendBrevoApi } = require('../utils/brevoApi');
-    return await sendBrevoApi(mailOptions);
+      html: adminOrderTemplate(order, storeName)
+    });
   } catch (err) {
     logger.error(`🔥 Admin Order Email Error: ${err.message}`);
   }
@@ -160,16 +168,13 @@ const sendAdminContactNotificationEmail = async (contactData) => {
     });
 
     const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
-    const mailOptions = {
+    return await dispatchEmail({
       from: `Contact Form <${fromEmail}>`,
       fromEmail,
       to: adminEmail,
       subject: `📩 New Contact Inquiry: ${contactData.subject || 'Support'}`,
       html
-    };
-
-    const { sendBrevoApi } = require('../utils/brevoApi');
-    return await sendBrevoApi(mailOptions);
+    });
   } catch (err) {
     logger.error(`🔥 Contact Email Error: ${err.message}`);
   }
@@ -197,3 +202,4 @@ module.exports = {
   sendAdminOrderCancellationEmail,
   getEmailSettings
 };
+
