@@ -156,6 +156,10 @@ app.get('/api/v1/health', (req, res) => {
 // ─── API Routes ───────────────────────────────────────────────
 const API = '/api/v1';
 
+// User requested route for testing
+const notificationRoutes = require('./src/routes/notifications');
+app.use(API, notificationRoutes);
+
 // VIP Priority Routes (Procurement & Scanning)
 app.use(`${API}/admin/inventory`, protect, isAdmin, require('./src/routes/inventory.routes'));
 // 🚀 ABSOLUTE TEST ROUTE (FORCE)
