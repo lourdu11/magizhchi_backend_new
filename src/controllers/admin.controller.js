@@ -602,14 +602,11 @@ exports.updateSettings = async (req, res, next) => {
       if (testType === 'all' || testType === 'order') {
         const dummyOrder = {
           _id: '507f1f77bcf86cd799439011',
-          orderNumber: 'TEST-ORDER-999',
-          shippingAddress: {
-            name: 'Test Customer',
-            phone: settings?.notifications?.whatsapp?.adminPhone
-          },
-          pricing: { totalAmount: 1500 },
-          paymentMethod: 'UPI',
-          items: [{ productName: 'Test Product', variant: { size: 'XL', color: 'White' }, quantity: 1 }]
+          orderNumber: 'TEST-ORDER-BREVO',
+          shippingAddress: { name: 'Diagnostic Test', phone: '0000000000' },
+          pricing: { totalAmount: 1 },
+          paymentMethod: 'TEST',
+          items: [{ productName: 'Diagnostic Ping', variant: { size: 'N/A', color: 'N/A' }, quantity: 1 }]
         };
         
         const orderNotif = settings.notifications?.orderNotifications || { enabled: true, method: 'both' };
