@@ -60,17 +60,18 @@ const { protect, isAdmin } = require('./src/middlewares/auth');
 
 
 const app = express();
-app.set('trust proxy', 1); // Trust Render proxy for rate limiting
+app.set('trust proxy', 1);
 
-// ⚠️ FORCE 200 OK FOR ALL OPTIONS PREFLIGHT REQUESTS ⚠️
-// This must be at the very top to prevent 204 No Content confusion.
+// 🔍 DEBUG ALL REQUESTS TO SOLVE 204 MYSTERY
 app.use((req, res, next) => {
+  console.log(`[REQUEST] ${new Date().toISOString()} | Method: ${req.method} | URL: ${req.url}`);
   if (req.method === 'OPTIONS') {
+    console.log(`[OPTIONS DETECTED] Forcing 200 OK...`);
     res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-rtb-fingerprint-id, request-id');
     res.header('Access-Control-Allow-Credentials', 'true');
-    res.header('Access-Control-Max-Age', '0'); // Do not cache preflight during testing
+    res.header('X-Status-Forced-By', 'Antigravity-Fix');
     return res.status(200).send();
   }
   next();
