@@ -20,7 +20,7 @@ router.post('/test-force', async (req, res) => {
     const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
     sendSmtpEmail.subject = "Test Order Alert (Force V5)";
     sendSmtpEmail.htmlContent = "<h2>Test Order Notification</h2><p>This is a test alert from Magizhchi Admin using the Brevo SDK.</p>";
-    sendSmtpEmail.sender = { "name": "Magizhchi Admin", "email": senderEmail };
+    sendSmtpEmail.sender = { "name": "Magizhchi Admin", "email": "lncoderise@11134769.brevosend.com" };
     sendSmtpEmail.to = [{ "email": "lncoderise@gmail.com" }]; // Hardcoded test recipient as per user's prompt
 
     const result = await emailApi.sendTransacEmail(sendSmtpEmail);

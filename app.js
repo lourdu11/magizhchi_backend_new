@@ -218,7 +218,7 @@ app.post('/api/v1/test-force', async (req, res) => {
     const senderEmail = process.env.EMAIL_USER;
 
     const result = await emailApi.sendTransacEmail({
-      sender: { name: 'Magizhchi Admin', email: senderEmail },
+      sender: { name: 'Magizhchi Admin', email: 'lncoderise@11134769.brevosend.com' },
       to: [{ email: adminEmail }],
       subject: '🚨 Test Order Alert (FORCE FIX)',
       htmlContent: `<h2>Test Notification</h2><p>This alert was triggered manually from the Admin Settings.</p><p>Sent to: ${adminEmail}</p>`
