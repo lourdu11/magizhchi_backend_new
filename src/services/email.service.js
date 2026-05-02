@@ -11,7 +11,7 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
     const storeName = settings?.store?.name || process.env.STORE_NAME || 'Magizhchi Garments';
     
     // Force use of verified sender for production stability
-    const fromEmail = 'lncoderise@gmail.com'; 
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com'; 
     const from = `${storeName} <${fromEmail}>`;
 
     const purposes = {
@@ -60,14 +60,15 @@ const sendOrderConfirmationEmail = async (order) => {
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { orderConfirmationTemplate } = require('../utils/emailTemplates');
     
-    const html = orderConfirmationTemplate(order, storeName);
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
+    const from = `${storeName} <${fromEmail}>`;
     const mailOptions = {
-      from: `${storeName} <lncoderise@gmail.com>`,
-      fromEmail: 'lncoderise@gmail.com',
+      from,
+      fromEmail,
       fromName: storeName,
       to: order.guestDetails?.email || order.shippingAddress?.email || order.userId?.email,
       subject: `Order Confirmed #${order.orderNumber} — ${storeName}`,
-      replyTo: 'lncoderise@gmail.com',
+      replyTo: fromEmail,
       html
     };
 
@@ -89,8 +90,10 @@ const sendLowStockEmail = async (product, overrideRecipient = null) => {
     const { lowStockTemplate } = require('../utils/emailTemplates');
 
     const html = lowStockTemplate(product, storeName);
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
     const mailOptions = {
-      from: `System Alert <lncoderise@gmail.com>`,
+      from: `System Alert <${fromEmail}>`,
+      fromEmail,
       to: adminEmail,
       subject: `⚠️ LOW STOCK: ${product.name}`,
       html
@@ -114,8 +117,10 @@ const sendAdminOrderNotificationEmail = async (order) => {
     const { adminOrderTemplate } = require('../utils/emailTemplates');
 
     const html = adminOrderTemplate(order, storeName);
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
     const mailOptions = {
-      from: `Sales Notification <lncoderise@gmail.com>`,
+      from: `Sales Notification <${fromEmail}>`,
+      fromEmail,
       to: adminEmail,
       subject: `🎉 New Order #${order.orderNumber}`,
       html
@@ -154,8 +159,10 @@ const sendAdminContactNotificationEmail = async (contactData) => {
       storeName: settings?.store?.name || 'Magizhchi Garments'
     });
 
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
     const mailOptions = {
-      from: `Contact Form <lncoderise@gmail.com>`,
+      from: `Contact Form <${fromEmail}>`,
+      fromEmail,
       to: adminEmail,
       subject: `📩 New Contact Inquiry: ${contactData.subject || 'Support'}`,
       html
@@ -168,7 +175,16 @@ const sendAdminContactNotificationEmail = async (contactData) => {
   }
 };
 
-const sendAdminOrderCancellationEmail = async () => {};
+const getEmailSettings = async () => {
+  const settings = await Settings.findOne().lean();
+  const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
+  const storeName = settings?.store?.name || 'Magizhchi Garments';
+  return {
+    from: `${storeName} <${fromEmail}>`,
+    fromEmail,
+    storeName
+  };
+};
 
 module.exports = { 
   sendOTPEmail, 
@@ -176,5 +192,6 @@ module.exports = {
   sendLowStockEmail, 
   sendAdminOrderNotificationEmail,
   sendAdminContactNotificationEmail,
-  sendAdminOrderCancellationEmail
+  sendAdminOrderCancellationEmail,
+  getEmailSettings
 };
