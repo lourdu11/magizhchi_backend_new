@@ -628,11 +628,11 @@ exports.updateSettings = async (req, res, next) => {
       // 3. Contact Alert Test
       if (testType === 'all' || testType === 'contact') {
         const dummyContact = {
-          name: 'Test Inquirer',
-          email: 'test@example.com',
+          name: 'John Doe',
+          email: 'johndoe.contact@gmail.com',
           phone: '9876543210',
-          subject: 'Website Test Inquiry',
-          message: 'This is a test contact message to verify your notification settings.'
+          subject: 'Question about your products',
+          message: 'Hello, I would like to know more about the available sizes for your latest collection.'
         };
         
         const contactNotif = settings.notifications?.contactNotifications || { enabled: true, method: 'both' };
