@@ -1,106 +1,43 @@
 const nodemailer = require('nodemailer');
 const logger = require('../utils/logger');
-const Settings = require('../models/Settings');
 
-/**
- * Dynamically creates a transporter based on the latest database settings.
- * Falls back to environment variables or placeholder settings if DB is unconfigured.
- */
 const getTransporter = async () => {
-  try {
-    const settings = await Settings.findOne().lean();
-    const config = settings?.notifications?.email;
+  const user = process.env.EMAIL_USER;
+  const pass = process.env.EMAIL_PASSWORD?.replace(/\s/g, '');
 
-    // Use DB settings if fully configured (host, user, and non-empty password)
-    if (config?.host && config?.user && config?.password && config.password.trim() !== '') {
-      logger.info(`📧 Email: Using Database settings (Host: ${config.host})`);
-      return nodemailer.createTransport({
-        host: config.host,
-        port: parseInt(config.port || '587'),
-        secure: parseInt(config.port) === 465,
-        auth: {
-          user: config.user,
-          pass: config.password.replace(/\s/g, ''), 
-        },
-        tls: {
-          rejectUnauthorized: false
-        },
-        connectionTimeout: 15000,
-        family: 4
-      });
-    }
-
-    // Fallback to environment variables
-    const envUser = process.env.EMAIL_USER;
-    const envPass = process.env.EMAIL_PASSWORD;
-    logger.info(`📧 Email: Using Environment settings (User: ${envUser || 'None'})`);
-    
-    const isPlaceholder = !envUser || envUser.includes('placeholder') || envUser === 'your_gmail@gmail.com';
-
-    if (isPlaceholder && process.env.NODE_ENV !== 'production') {
-      logger.info('📧 Email: Using Ethereal (Dev) fallback');
-      return nodemailer.createTransport({
-        host: 'smtp.ethereal.email',
-        port: 587,
-        auth: { user: 'dev@ethereal.email', pass: 'devpass' },
-      });
-    }
-
-    const envHost = process.env.EMAIL_HOST || 'smtp.gmail.com';
-    const envPort = parseInt(process.env.EMAIL_PORT || '465');
-    const envSecure = process.env.EMAIL_SECURE === 'true' || envPort === 465;
-
-    logger.info(`📧 Email: Connecting to ${envHost}:${envPort} (User: ${envUser || 'None'})`);
-
-    return nodemailer.createTransport({
-      host: envHost,
-      port: envPort,
-      secure: envSecure,
-      auth: {
-        user: envUser,
-        pass: envPass ? envPass.replace(/\s/g, '') : '', 
-      },
-      tls: {
-        rejectUnauthorized: false
-      },
-      connectionTimeout: 30000,
-      greetingTimeout: 10000,
-      socketTimeout: 30000,
-      family: 4
-    });
-  } catch (err) {
-    logger.error('Error creating email transporter:', err);
-    throw err;
+  if (!user || !pass) {
+    logger.error('❌ EMAIL_USER or EMAIL_PASSWORD not set in environment');
+    throw new Error('Gmail SMTP credentials not configured');
   }
+
+  logger.info(`📧 Gmail SMTP: Connecting as ${user}`);
+
+  return nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    auth: {
+      user: user,
+      pass: pass
+    },
+    tls: {
+      rejectUnauthorized: false
+    },
+    connectionTimeout: 15000,
+    greetingTimeout: 10000,
+    socketTimeout: 30000
+  });
 };
 
 const verifyEmailConfig = async () => {
   try {
-    const host = process.env.EMAIL_HOST || '';
-    const hasBrevoKey = process.env.BREVO_API_KEY || (process.env.EMAIL_PASSWORD && process.env.EMAIL_PASSWORD.trim().startsWith('xkeysib-'));
-    
-    if (host === 'api.brevo.com' || hasBrevoKey) {
-      logger.info('✅ Email Ready: [Brevo API Mode Active]');
-      return true;
-    }
-
-    logger.info('📧 Email: Verifying SMTP configuration...');
+    logger.info('📧 Verifying Gmail SMTP configuration...');
     const transporter = await getTransporter();
-    
-    // Run verification in the background
-    transporter.verify().then(() => {
-      logger.info('✅ Email Ready: [SMTP Connected]');
-    }).catch(err => {
-      if (host === 'smtp.resend.com') {
-        logger.info('ℹ️  SMTP port blocked, but Resend API is active.');
-      } else {
-        logger.error(`❌ Email Error: ${err.message}`);
-      }
-    });
-    
+    await transporter.verify();
+    logger.info('✅ Gmail SMTP Ready: Connected successfully');
     return true;
   } catch (err) {
-    logger.error(`❌ Email Error: ${err.message}`);
+    logger.error(`❌ Gmail SMTP Error: ${err.message}`);
     return false;
   }
 };

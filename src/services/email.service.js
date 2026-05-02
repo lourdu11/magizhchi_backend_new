@@ -1,25 +1,10 @@
-/**
- * Helper to get the most current Admin Alert Email at runtime.
- * NO FALLBACK — if not configured, returns null and skips sending.
- */
-const getAdminRecipient = async () => {
-  const settings = await Settings.findOne().lean();
-  const alertEmail = settings?.notifications?.email?.alertEmail?.trim().toLowerCase();
-  
-  if (!alertEmail) {
-    logger.error('❌ No Admin Notification Email set in Settings');
-    return null;
-  }
-  
-  logger.info(`✅ Admin recipient resolved -> ${alertEmail}`); // Watch Render logs for this
-  return alertEmail;
-};
+const Settings = require('../models/Settings');
+const logger = require('../utils/logger');
 
 /**
- * Internal helper to dispatch email using the best available method
+ * Single recipient guard + Gmail SMTP dispatcher
  */
 const dispatchEmail = async (mailOptions) => {
-  // ✅ GUARD: Block multiple recipients at the dispatcher level
   if (!mailOptions.to || typeof mailOptions.to !== 'string') {
     logger.error('❌ dispatchEmail blocked: recipient missing or invalid');
     return;
@@ -30,22 +15,7 @@ const dispatchEmail = async (mailOptions) => {
   }
 
   try {
-    const settings = await Settings.findOne().lean();
-    const dbEmail = settings?.notifications?.email;
-
-    const brevoApiKey = process.env.BREVO_API_KEY;
-    const smtpPassword = (dbEmail?.password || process.env.EMAIL_PASSWORD || '').trim();
-    const isBrevo = brevoApiKey || smtpPassword.startsWith('xkeysib-') || 
-                    process.env.EMAIL_HOST === 'api.brevo.com' ||
-                    dbEmail?.host === 'smtp-relay.brevo.com';
-
-    if (isBrevo) {
-      const { sendBrevoApi } = require('../utils/brevoApi');
-      logger.info(`📧 Brevo -> TO: ${mailOptions.to}`); // Log recipient for verification
-      return await sendBrevoApi(mailOptions);
-    }
-
-    logger.info(`📧 SMTP -> TO: ${mailOptions.to}`);
+    logger.info(`📧 Gmail SMTP → TO: ${mailOptions.to}`);
     const { getTransporter } = require('../config/email');
     const transporter = await getTransporter();
     return await transporter.sendMail(mailOptions);
@@ -56,35 +26,56 @@ const dispatchEmail = async (mailOptions) => {
 };
 
 /**
- * Sends OTP Email
+ * Single source of truth for admin recipient
+ * NO fallbacks — if not set, returns null and blocks send
+ */
+const getAdminRecipient = async () => {
+  const settings = await Settings.findOne().lean();
+  const alertEmail = settings?.notifications?.email?.alertEmail?.trim().toLowerCase();
+
+  if (!alertEmail) {
+    logger.error('❌ No Admin Notification Email configured in Settings → Notifications');
+    return null;
+  }
+
+  logger.info(`✅ Admin recipient resolved → ${alertEmail}`);
+  return alertEmail;
+};
+
+/**
+ * Get FROM address — always from environment
+ */
+const getFromAddress = (storeName) => {
+  const fromEmail = process.env.EMAIL_USER;
+  if (!fromEmail) {
+    logger.error('❌ EMAIL_USER not set in environment');
+    return null;
+  }
+  return { from: `${storeName} <${fromEmail}>`, fromEmail };
+};
+
+/**
+ * OTP Email
  */
 const sendOTPEmail = async (email, otp, purpose = 'register') => {
   try {
     const settings = await Settings.findOne().lean();
-    const storeName = settings?.store?.name || process.env.STORE_NAME || 'Magizhchi Garments';
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM; 
-
-    if (!fromEmail) {
-      logger.error('❌ No FROM email configured. Cannot send OTP email.');
-      return;
-    }
-
-    const from = `${storeName} <${fromEmail}>`;
+    const storeName = settings?.store?.name || 'Magizhchi Garments';
+    const sender = getFromAddress(storeName);
+    if (!sender) return;
 
     const purposes = {
-      register: { subject: 'Verify Your Account', title: 'Welcome!', action: 'Verify Email' },
-      login: { subject: 'Login OTP', title: 'Login OTP', action: 'Login' },
-      password_reset: { subject: 'Password Reset OTP', title: 'Reset Password', action: 'Reset Password' }
+      register: { subject: 'Verify Your Account', title: 'Welcome!' },
+      login: { subject: 'Login OTP', title: 'Login OTP' },
+      password_reset: { subject: 'Password Reset OTP', title: 'Reset Password' }
     };
     const meta = purposes[purpose] || purposes.register;
 
-    return await dispatchEmail({ 
-      from, 
-      fromEmail, 
-      fromName: storeName,
-      to: email, 
-      subject: `${meta.subject} — ${storeName}`, 
-      html: `<h2>${meta.title}</h2><p>Your OTP is: <b>${otp}</b></p>`
+    return await dispatchEmail({
+      from: sender.from,
+      to: email,
+      subject: `${meta.subject} — ${storeName}`,
+      html: `<h2>${meta.title}</h2><p>Your OTP is: <b>${otp}</b></p><p>Valid for 10 minutes.</p>`
     });
   } catch (err) {
     logger.error(`🔥 OTP Email Error: ${err.message}`);
@@ -93,28 +84,29 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
 };
 
 /**
- * Sends Order Confirmation to Customer
+ * Order Confirmation to Customer
  */
 const sendOrderConfirmationEmail = async (order) => {
   try {
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || 'Magizhchi Garments';
-    const { orderConfirmationTemplate } = require('../utils/emailTemplates');
-    
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
-    
-    if (!fromEmail) {
-      logger.error('❌ No FROM email configured. Cannot send order confirmation.');
+    const sender = getFromAddress(storeName);
+    if (!sender) return;
+
+    const customerEmail = order.guestDetails?.email
+      || order.shippingAddress?.email
+      || order.userId?.email;
+
+    if (!customerEmail) {
+      logger.error('❌ No customer email found for order confirmation');
       return;
     }
 
-    const from = `${storeName} <${fromEmail}>`;
-    
+    const { orderConfirmationTemplate } = require('../utils/emailTemplates');
+
     return await dispatchEmail({
-      from,
-      fromEmail,
-      fromName: storeName,
-      to: order.guestDetails?.email || order.shippingAddress?.email || order.userId?.email,
+      from: sender.from,
+      to: customerEmail,
       subject: `Order Confirmed #${order.orderNumber} — ${storeName}`,
       html: orderConfirmationTemplate(order, storeName)
     });
@@ -124,29 +116,24 @@ const sendOrderConfirmationEmail = async (order) => {
 };
 
 /**
- * Sends Low Stock Alert to Admin
+ * Low Stock Alert to Admin
  */
-const sendLowStockEmail = async (product, overrideRecipient = null) => {
+const sendLowStockEmail = async (product) => {
   try {
-    const adminEmail = overrideRecipient || await getAdminRecipient();
+    const adminEmail = await getAdminRecipient();
     if (!adminEmail) return;
 
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || 'Magizhchi Garments';
+    const sender = getFromAddress(storeName);
+    if (!sender) return;
+
     const { lowStockTemplate } = require('../utils/lowStockAlert');
 
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
-
-    if (!fromEmail) {
-      logger.error('❌ No FROM email configured. Cannot send low stock alert.');
-      return;
-    }
-
     return await dispatchEmail({
-      from: `System Alert <${fromEmail}>`,
-      fromEmail,
+      from: `System Alert <${sender.fromEmail}>`,
       to: adminEmail,
-      subject: `⚠️ LOW STOCK: ${product.name}`,
+      subject: `⚠️ LOW STOCK: ${product.name || product.productName}`,
       html: lowStockTemplate(product, storeName)
     });
   } catch (err) {
@@ -155,7 +142,7 @@ const sendLowStockEmail = async (product, overrideRecipient = null) => {
 };
 
 /**
- * Sends New Order Alert to Admin
+ * New Order Alert to Admin
  */
 const sendAdminOrderNotificationEmail = async (order) => {
   try {
@@ -164,18 +151,13 @@ const sendAdminOrderNotificationEmail = async (order) => {
 
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || 'Magizhchi Garments';
+    const sender = getFromAddress(storeName);
+    if (!sender) return;
+
     const { adminOrderTemplate } = require('../utils/emailTemplates');
 
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
-
-    if (!fromEmail) {
-      logger.error('❌ No FROM email configured. Cannot send admin order notification.');
-      return;
-    }
-
     return await dispatchEmail({
-      from: `Sales Notification <${fromEmail}>`,
-      fromEmail,
+      from: `Sales Notification <${sender.fromEmail}>`,
       to: adminEmail,
       subject: `🎉 New Order #${order.orderNumber}`,
       html: adminOrderTemplate(order, storeName)
@@ -186,7 +168,7 @@ const sendAdminOrderNotificationEmail = async (order) => {
 };
 
 /**
- * Sends Contact Form Notification to Admin
+ * Contact Form Notification to Admin
  */
 const sendAdminContactNotificationEmail = async (contactData) => {
   try {
@@ -194,12 +176,15 @@ const sendAdminContactNotificationEmail = async (contactData) => {
     if (!adminEmail) return;
 
     const settings = await Settings.findOne().lean();
+    const storeName = settings?.store?.name || 'Magizhchi Garments';
+    const sender = getFromAddress(storeName);
+    if (!sender) return;
+
     const { generateEmailHTML } = require('../utils/emailTemplates');
 
     const body = `
       <h2>New Inquiry Received</h2>
-      <p>A customer has sent a message via the contact form:</p>
-      <div style="background-color:#f3f4f6; padding:20px; border-radius:8px; margin:20px 0">
+      <div style="background:#f3f4f6;padding:20px;border-radius:8px;margin:20px 0">
         <p><b>Name:</b> ${contactData.name}<br/>
         <b>Email:</b> ${contactData.email}<br/>
         <b>Subject:</b> ${contactData.subject || 'N/A'}<br/>
@@ -207,78 +192,61 @@ const sendAdminContactNotificationEmail = async (contactData) => {
       </div>
     `;
 
-    const html = generateEmailHTML({
-      title: 'New Contact Inquiry',
-      body,
-      storeName: settings?.store?.name || 'Magizhchi Garments'
-    });
-
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
-
-    if (!fromEmail) {
-      logger.error('❌ No FROM email configured. Cannot send admin contact notification.');
-      return;
-    }
-
     return await dispatchEmail({
-      from: `Contact Form <${fromEmail}>`,
-      fromEmail,
+      from: `Contact Form <${sender.fromEmail}>`,
       to: adminEmail,
       subject: `📩 New Contact Inquiry: ${contactData.subject || 'Support'}`,
-      html
+      html: generateEmailHTML({ title: 'New Contact Inquiry', body, storeName })
     });
   } catch (err) {
     logger.error(`🔥 Contact Email Error: ${err.message}`);
   }
 };
 
+/**
+ * Order Cancellation Alert to Admin
+ */
 const sendAdminOrderCancellationEmail = async (order) => {
   try {
     const adminEmail = await getAdminRecipient();
     if (!adminEmail) return;
-    
+
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || 'Magizhchi Garments';
-    
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
-
-    if (!fromEmail) {
-      logger.error('❌ No FROM email configured. Cannot send admin order cancellation alert.');
-      return;
-    }
+    const sender = getFromAddress(storeName);
+    if (!sender) return;
 
     return await dispatchEmail({
-      from: `Cancellation Alert <${fromEmail}>`,
-      fromEmail,
+      from: `Cancellation Alert <${sender.fromEmail}>`,
       to: adminEmail,
       subject: `❌ Order Cancelled #${order.orderNumber}`,
-      html: `<p>Order <b>#${order.orderNumber}</b> has been cancelled by the customer.</p>`
+      html: `<p>Order <b>#${order.orderNumber}</b> has been cancelled.</p>`
     });
   } catch (err) {
     logger.error(`🔥 Admin Cancellation Email Error: ${err.message}`);
   }
 };
 
+/**
+ * Get email settings helper
+ */
 const getEmailSettings = async () => {
   const settings = await Settings.findOne().lean();
-  const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
+  const fromEmail = process.env.EMAIL_USER;
   const storeName = settings?.store?.name || 'Magizhchi Garments';
   return {
-    from: fromEmail ? `${storeName} <${fromEmail}>` : null,
+    from: `${storeName} <${fromEmail}>`,
     fromEmail,
     storeName
   };
 };
 
-module.exports = { 
-  sendOTPEmail, 
-  sendOrderConfirmationEmail, 
-  sendLowStockEmail, 
+module.exports = {
+  sendOTPEmail,
+  sendOrderConfirmationEmail,
+  sendLowStockEmail,
   sendAdminOrderNotificationEmail,
   sendAdminContactNotificationEmail,
   sendAdminOrderCancellationEmail,
   getEmailSettings
 };
-
-
-

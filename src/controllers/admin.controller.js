@@ -542,17 +542,16 @@ exports.updateSettings = async (req, res, next) => {
       // ── SANITIZATION: Admin Notification Email ──
       if (settingsData.notifications?.email?.alertEmail) {
         const email = settingsData.notifications.email.alertEmail.trim().toLowerCase();
-        
-        // REJECT if multiple emails detected
+
         if (email.includes(',') || email.includes(';') || email.includes(' ')) {
-          return ApiResponse.error(res, 'Only one single Admin Notification Email is allowed. No comma-separated emails.', 400);
+          return ApiResponse.error(res, 'Only one single Admin Notification Email is allowed.', 400);
         }
 
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(email)) {
           return ApiResponse.error(res, 'Invalid Admin Notification Email format', 400);
         }
-        
+
         settingsData.notifications.email.alertEmail = email;
       }
 
@@ -604,10 +603,13 @@ exports.updateSettings = async (req, res, next) => {
         const dummyOrder = {
           _id: '507f1f77bcf86cd799439011',
           orderNumber: 'TEST-ORDER-999',
-          shippingAddress: { name: 'Test Customer', phone: settings.notifications?.whatsapp?.adminPhone },
+          shippingAddress: {
+            name: 'Test Customer',
+            phone: settings?.notifications?.whatsapp?.adminPhone
+          },
           pricing: { totalAmount: 1500 },
           paymentMethod: 'UPI',
-          items: [{ productName: 'Premium Cotton Shirt', variant: { size: 'XL', color: 'White' }, quantity: 1 }]
+          items: [{ productName: 'Test Product', variant: { size: 'XL', color: 'White' }, quantity: 1 }]
         };
         
         const orderNotif = settings.notifications?.orderNotifications || { enabled: true, method: 'both' };
@@ -711,22 +713,22 @@ exports.testNotifications = async (req, res, next) => {
     if (type === 'all' || type === 'email') {
       try {
         const settings = await Settings.findOne();
-        // ✅ FIXED: No store.email fallback — only alertEmail is the source of truth
         const targetEmail = settings?.notifications?.email?.alertEmail?.trim().toLowerCase();
-        
-        if (!targetEmail) throw new Error('No Admin Notification Email configured in Settings → Notifications');
+
+        if (!targetEmail) {
+          throw new Error('No Admin Notification Email configured in Settings → Notifications');
+        }
 
         const { getTransporter } = require('../config/email');
         const transporter = await getTransporter();
-        const { from } = await require('../services/email.service').getEmailSettings();
 
         await transporter.sendMail({
-          from,
+          from: `Magizhchi Garments <${process.env.EMAIL_USER}>`,
           to: targetEmail,
           subject: '🧪 Magizhchi Notification Test',
-          text: `This is a test email.\nSent at: ${new Date().toLocaleString()}`,
-          html: `<h3>🧪 Magizhchi Notification Test</h3><p>Your SMTP settings are working correctly.</p><p>Sent at: ${new Date().toLocaleString()}</p>`
+          html: `<h3>✅ Gmail SMTP Working</h3><p>Sent at: ${new Date().toLocaleString()}</p>`
         });
+
         results.email = { success: true, message: `Test email sent to ${targetEmail}` };
       } catch (err) {
         results.email = { success: false, error: err.message };
