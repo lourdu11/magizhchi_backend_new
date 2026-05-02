@@ -175,6 +175,8 @@ const sendAdminContactNotificationEmail = async (contactData) => {
   }
 };
 
+const sendAdminOrderCancellationEmail = async () => {};
+
 const getEmailSettings = async () => {
   const settings = await Settings.findOne().lean();
   const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
