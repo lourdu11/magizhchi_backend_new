@@ -158,6 +158,11 @@ const API = '/api/v1';
 
 // VIP Priority Routes (Procurement & Scanning)
 app.use(`${API}/admin/inventory`, protect, isAdmin, require('./src/routes/inventory.routes'));
+// 🚀 ABSOLUTE TEST ROUTE (FORCE)
+app.post('/api/v1/test-force', (req, res) => {
+  res.json({ success: true, message: 'FORCE SUCCESS - V3', timestamp: new Date().toISOString() });
+});
+
 app.use(`${API}/admin`, adminRoutes);
 
 app.use(`${API}/public`, publicRoutes);
