@@ -539,6 +539,19 @@ exports.updateSettings = async (req, res, next) => {
     if (!settings) {
       settings = await Settings.create(settingsData);
     } else {
+      // ── SANITIZATION: Admin Notification Email ──
+      if (settingsData.notifications?.email?.alertEmail) {
+        let email = settingsData.notifications.email.alertEmail.trim().toLowerCase();
+        
+        // Basic Email Validation
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+          return ApiResponse.error(res, 'Invalid Admin Notification Email format', 400);
+        }
+        
+        settingsData.notifications.email.alertEmail = email;
+      }
+
       // ── PREVENTION: Don't overwrite password/API key with empty strings ──
       // Use a flat object to update specific nested fields without overwriting entire sub-objects
       const updateData = {};
