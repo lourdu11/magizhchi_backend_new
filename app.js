@@ -202,10 +202,12 @@ app.use((req, res) => {
 // Diagnostic Health Check
 app.get('/api/v1/health-v2', (req, res) => {
   try {
-    const version = fs.readFileSync(path.join(__dirname, 'VERSION.txt'), 'utf8');
+    const version = fs.readFileSync(path.join(__dirname, 'VERSION.txt'), 'utf8').trim();
+    const isCorrectRepo = fs.existsSync(path.join(__dirname, 'IM_THE_CORRECT_REPO.txt'));
     res.json({ 
       status: 'online', 
-      version: version.trim(), 
+      version: version, 
+      isCorrectRepo: isCorrectRepo,
       timestamp: new Date().toISOString() 
     });
   } catch (err) {
