@@ -194,6 +194,15 @@ app.use((req, res) => {
 });
 
 // ─── Global Error Handler ─────────────────────────────────────
+// Diagnostic Health Check
+app.get('/api/v1/health-v2', (req, res) => {
+  res.json({ 
+    status: 'online', 
+    version: 'V2-READY', 
+    timestamp: new Date().toISOString() 
+  });
+});
+
 app.use(errorHandler);
 
 // ─── Global Crash Logging ──────────────────────────────────────
