@@ -1,44 +1,51 @@
 /**
+ * Helper to get the most current Admin Alert Email at runtime.
+ * NO FALLBACK — if not configured, returns null and skips sending.
+ */
+const getAdminRecipient = async () => {
+  const settings = await Settings.findOne().lean();
+  const alertEmail = settings?.notifications?.email?.alertEmail?.trim().toLowerCase();
+  
+  if (!alertEmail) {
+    logger.error('❌ No Admin Notification Email set in Settings');
+    return null;
+  }
+  
+  logger.info(`✅ Admin recipient resolved -> ${alertEmail}`); // Watch Render logs for this
+  return alertEmail;
+};
+
+/**
  * Internal helper to dispatch email using the best available method
  */
 const dispatchEmail = async (mailOptions) => {
-  // STRICT SINGLE RECIPIENT GUARD
+  // ✅ GUARD: Block multiple recipients at the dispatcher level
   if (!mailOptions.to || typeof mailOptions.to !== 'string') {
-    logger.error('❌ dispatchEmail blocked: recipient is missing or not a string');
+    logger.error('❌ dispatchEmail blocked: recipient missing or invalid');
     return;
   }
-  if (mailOptions.to.includes(',') || mailOptions.to.includes(';') || mailOptions.to.includes(' ')) {
-    logger.error(`❌ dispatchEmail blocked: multiple recipients detected -> ${mailOptions.to}`);
+  if (mailOptions.to.includes(',') || mailOptions.to.includes(';')) {
+    logger.error(`❌ dispatchEmail BLOCKED — multiple recipients: ${mailOptions.to}`);
     return;
   }
 
   try {
     const settings = await Settings.findOne().lean();
     const dbEmail = settings?.notifications?.email;
-    
-    // Check if we should use Brevo API
+
     const brevoApiKey = process.env.BREVO_API_KEY;
     const smtpPassword = (dbEmail?.password || process.env.EMAIL_PASSWORD || '').trim();
-    
-    // Auto-detect Brevo (API Key in password or explicit BREVO_API_KEY env)
-    const isBrevo = 
-      brevoApiKey || 
-      smtpPassword.startsWith('xkeysib-') || 
-      process.env.EMAIL_HOST === 'api.brevo.com' ||
-      (dbEmail?.host === 'smtp-relay.brevo.com');
+    const isBrevo = brevoApiKey || smtpPassword.startsWith('xkeysib-') || 
+                    process.env.EMAIL_HOST === 'api.brevo.com' ||
+                    dbEmail?.host === 'smtp-relay.brevo.com';
 
     if (isBrevo) {
       const { sendBrevoApi } = require('../utils/brevoApi');
-      try {
-        logger.info(`📧 Email: Dispatching via Brevo API to ${mailOptions.to}`);
-        return await sendBrevoApi(mailOptions);
-      } catch (err) {
-        logger.warn(`⚠️ Brevo API Failed: ${err.message}. Falling back to SMTP...`);
-      }
+      logger.info(`📧 Brevo -> TO: ${mailOptions.to}`); // Log recipient for verification
+      return await sendBrevoApi(mailOptions);
     }
 
-    // SMTP Fallback
-    logger.info(`📧 Email: Dispatching via SMTP to ${mailOptions.to}`);
+    logger.info(`📧 SMTP -> TO: ${mailOptions.to}`);
     const { getTransporter } = require('../config/email');
     const transporter = await getTransporter();
     return await transporter.sendMail(mailOptions);
@@ -46,22 +53,6 @@ const dispatchEmail = async (mailOptions) => {
     logger.error(`🔥 Email Dispatch Error: ${err.message}`);
     throw err;
   }
-};
-
-/**
- * Helper to get the most current Admin Alert Email at runtime.
- * NO FALLBACK — if not configured, returns null and skips sending.
- */
-const getAdminRecipient = async () => {
-  const settings = await Settings.findOne().lean();
-  const alertEmail = settings?.notifications?.email?.alertEmail;
-
-  if (!alertEmail || alertEmail.trim() === '') {
-    logger.error('❌ CRITICAL: No Admin Notification Email configured in settings. Email not sent.');
-    return null;
-  }
-
-  return alertEmail.trim().toLowerCase();
 };
 
 /**
