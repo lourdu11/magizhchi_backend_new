@@ -63,7 +63,9 @@ const getTransporter = async () => {
       tls: {
         rejectUnauthorized: false
       },
-      connectionTimeout: 15000,
+      connectionTimeout: 30000,
+      greetingTimeout: 10000,
+      socketTimeout: 30000,
       family: 4
     });
   } catch (err) {
