@@ -618,7 +618,12 @@ exports.updateSettings = async (req, res, next) => {
             whatsapp.sendOrderNotificationToAdmin(dummyOrder).catch(e => logger.error('Order Test WhatsApp Error:', e.message));
           }
           if (['email', 'both'].includes(orderNotif.method)) {
-            emailService.sendAdminOrderNotificationEmail(dummyOrder).catch(e => logger.error('Order Test Email Error:', e.message));
+            try {
+              await emailService.sendAdminOrderNotificationEmail(dummyOrder);
+            } catch (e) {
+              logger.error('Order Test Email Error:', e.message);
+              return res.status(500).json({ success: false, message: `Email Delivery Failed: ${e.message}` });
+            }
           }
         }
       }
@@ -639,7 +644,12 @@ exports.updateSettings = async (req, res, next) => {
             whatsapp.sendContactMessageNotificationToAdmin(dummyContact).catch(e => logger.error('Contact Test WhatsApp Error:', e.message));
           }
           if (['email', 'both'].includes(contactNotif.method)) {
-            emailService.sendAdminContactNotificationEmail(dummyContact).catch(e => logger.error('Contact Test Email Error:', e.message));
+            try {
+              await emailService.sendAdminContactNotificationEmail(dummyContact);
+            } catch (e) {
+              logger.error('Contact Test Email Error:', e.message);
+              return res.status(500).json({ success: false, message: `Email Delivery Failed: ${e.message}` });
+            }
           }
         }
       }

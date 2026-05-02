@@ -165,11 +165,12 @@ const sendAdminOrderNotificationEmail = async (order) => {
     });
   } catch (err) {
     logger.error(`🔥 Admin Order Email Error: ${err.message}`);
+    throw err;
   }
 };
 
 /**
- * Contact Form Notification to Admin
+ * Contact Alert to Admin
  */
 const sendAdminContactNotificationEmail = async (contactData) => {
   try {
@@ -181,26 +182,29 @@ const sendAdminContactNotificationEmail = async (contactData) => {
     const sender = getFromAddress(storeName);
     if (!sender) return;
 
-    const { generateEmailHTML } = require('../utils/emailTemplates');
-
     const body = `
       <h2>New Inquiry Received</h2>
       <div style="background:#f3f4f6;padding:20px;border-radius:8px;margin:20px 0">
         <p><b>Name:</b> ${contactData.name}<br/>
         <b>Email:</b> ${contactData.email}<br/>
-        <b>Subject:</b> ${contactData.subject || 'N/A'}<br/>
-        <b>Message:</b><br/>${contactData.message}</p>
+        <b>Phone:</b> ${contactData.phone}</p>
+        <p><b>Subject:</b> ${contactData.subject}</p>
+      </div>
+      <p><b>Message:</b></p>
+      <div style="padding:15px;border-left:4px solid #4f46e5;background:#fafafa">
+        ${contactData.message}
       </div>
     `;
 
     return await dispatchEmail({
       from: `Contact Form <${sender.fromEmail}>`,
       to: adminEmail,
-      subject: `📩 New Contact Inquiry: ${contactData.subject || 'Support'}`,
-      html: generateEmailHTML({ title: 'New Contact Inquiry', body, storeName })
+      subject: `📩 New Message: ${contactData.subject}`,
+      html: body
     });
   } catch (err) {
-    logger.error(`🔥 Contact Email Error: ${err.message}`);
+    logger.error(`🔥 Admin Contact Email Error: ${err.message}`);
+    throw err;
   }
 };
 
