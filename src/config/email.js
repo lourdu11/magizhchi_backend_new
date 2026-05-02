@@ -4,18 +4,21 @@ const logger = require('../utils/logger');
 const getTransporter = async () => {
   const user = process.env.EMAIL_USER;
   const pass = process.env.EMAIL_PASSWORD?.replace(/\s/g, '');
+  const host = process.env.EMAIL_HOST || 'smtp-relay.brevo.com';
+  const port = parseInt(process.env.EMAIL_PORT || '587');
+  const secure = process.env.EMAIL_SECURE === 'true';
 
   if (!user || !pass) {
     logger.error('❌ EMAIL_USER or EMAIL_PASSWORD not set in environment');
-    throw new Error('Gmail SMTP credentials not configured');
+    throw new Error('Brevo SMTP credentials not configured');
   }
 
-  logger.info(`📧 Gmail SMTP: Connecting as ${user}`);
+  logger.info(`📧 Brevo SMTP: Connecting via ${host}:${port} as ${user}`);
 
   return nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 465,
-    secure: true, // Use SSL
+    host: host,
+    port: port,
+    secure: secure,
     auth: {
       user: user,
       pass: pass
@@ -31,13 +34,13 @@ const getTransporter = async () => {
 
 const verifyEmailConfig = async () => {
   try {
-    logger.info('📧 Verifying Gmail SMTP configuration...');
+    logger.info('📧 Verifying Brevo SMTP configuration...');
     const transporter = await getTransporter();
     await transporter.verify();
-    logger.info('✅ Gmail SMTP Ready: Connected successfully');
+    logger.info('✅ Brevo SMTP Ready: Connected successfully');
     return true;
   } catch (err) {
-    logger.error(`❌ Gmail SMTP Error: ${err.message}`);
+    logger.error(`❌ Brevo SMTP Error: ${err.message}`);
     return false;
   }
 };

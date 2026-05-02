@@ -1,5 +1,5 @@
 const sendBrevoApi = async (mailOptions) => {
-  throw new Error('Brevo is disabled. All emails route through Gmail SMTP only.');
+  throw new Error('Brevo API disabled. All emails route through Brevo SMTP via config/email.js');
 };
 
 module.exports = { sendBrevoApi };

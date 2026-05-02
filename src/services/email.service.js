@@ -15,7 +15,7 @@ const dispatchEmail = async (mailOptions) => {
   }
 
   try {
-    logger.info(`📧 Gmail SMTP → TO: ${mailOptions.to}`);
+    logger.info(`📧 Brevo SMTP → TO: ${mailOptions.to}`);
     const { getTransporter } = require('../config/email');
     const transporter = await getTransporter();
     return await transporter.sendMail(mailOptions);
