@@ -69,9 +69,10 @@ app.use(helmet({
     directives: {
       ...helmet.contentSecurityPolicy.getDefaultDirectives(),
       "frame-src": ["'self'", "https://*.razorpay.com", "https://razorpay.com", "https://*.google.com", "https://www.google.com"],
-      "script-src": ["'self'", "'unsafe-inline'", "https://*.razorpay.com", "https://*.google.com", "https://www.google.com", "https://*.gstatic.com"],
+      "frame-ancestors": ["'self'", "https://*.razorpay.com", "https://razorpay.com"],
+      "script-src": ["'self'", "'unsafe-inline'", "https://checkout.razorpay.com", "https://*.razorpay.com", "https://*.google.com", "https://www.google.com", "https://*.gstatic.com"],
       "img-src": ["'self'", "data:", "https://*.razorpay.com", "https://ik.imagekit.io", "https://res.cloudinary.com", "https://*.google.com"],
-      "connect-src": ["'self'", "https://*.razorpay.com", "https://ik.imagekit.io", "https://res.cloudinary.com"],
+      "connect-src": ["'self'", "https://*.razorpay.com", "https://magizhchi-backend-new-1.onrender.com", "https://magizhchi-backend-new.onrender.com", "https://ik.imagekit.io", "https://res.cloudinary.com"],
     },
   },
 }));
