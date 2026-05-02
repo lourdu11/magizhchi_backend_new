@@ -87,6 +87,7 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-rtb-fingerprint-id', 'request-id'],
   exposedHeaders: ['x-rtb-fingerprint-id', 'request-id'],
+  optionsSuccessStatus: 200
 }));
 
 app.use(mongoSanitize); // Prevent NoSQL injection
