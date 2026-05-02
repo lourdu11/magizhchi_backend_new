@@ -15,10 +15,13 @@ const sendBrevoApi = async (options) => {
     throw new Error('Email service misconfigured (Invalid Brevo Key)');
   }
 
-  // Ensure 'to' is formatted correctly for Brevo API
-  const toList = Array.isArray(to) 
-    ? to.map(email => ({ email })) 
-    : [{ email: to }];
+  // Ensure 'to' is a single string and doesn't contain multiple emails
+  if (typeof to !== 'string' || to.includes(',') || to.includes(';') || to.includes(' ')) {
+    logger.error(`❌ Brevo API Blocked: Invalid or multiple recipients detected -> ${to}`);
+    throw new Error('Email sending blocked: Multiple recipients are not allowed.');
+  }
+
+  const toList = [{ email: to.trim().toLowerCase() }];
 
   const payload = {
     sender: { 

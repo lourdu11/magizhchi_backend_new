@@ -541,9 +541,13 @@ exports.updateSettings = async (req, res, next) => {
     } else {
       // ── SANITIZATION: Admin Notification Email ──
       if (settingsData.notifications?.email?.alertEmail) {
-        let email = settingsData.notifications.email.alertEmail.trim().toLowerCase();
+        const email = settingsData.notifications.email.alertEmail.trim().toLowerCase();
         
-        // Basic Email Validation
+        // REJECT if multiple emails detected
+        if (email.includes(',') || email.includes(';') || email.includes(' ')) {
+          return ApiResponse.error(res, 'Only one single Admin Notification Email is allowed. No comma-separated emails.', 400);
+        }
+
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(email)) {
           return ApiResponse.error(res, 'Invalid Admin Notification Email format', 400);

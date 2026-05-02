@@ -2,6 +2,16 @@
  * Internal helper to dispatch email using the best available method
  */
 const dispatchEmail = async (mailOptions) => {
+  // STRICT SINGLE RECIPIENT GUARD
+  if (!mailOptions.to || typeof mailOptions.to !== 'string') {
+    logger.error('❌ dispatchEmail blocked: recipient is missing or not a string');
+    return;
+  }
+  if (mailOptions.to.includes(',') || mailOptions.to.includes(';') || mailOptions.to.includes(' ')) {
+    logger.error(`❌ dispatchEmail blocked: multiple recipients detected -> ${mailOptions.to}`);
+    return;
+  }
+
   try {
     const settings = await Settings.findOne().lean();
     const dbEmail = settings?.notifications?.email;
