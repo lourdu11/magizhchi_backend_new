@@ -578,7 +578,7 @@ exports.updateSettings = async (req, res, next) => {
 
       flatten(settingsData);
       
-      settings = await Settings.findByIdAndUpdate(settings._id, { $set: updateData }, { returnDocument: 'after' });
+      settings = await Settings.findByIdAndUpdate(settings._id, { $set: updateData }, { new: true });
     }
 
     if (testAlert) {
