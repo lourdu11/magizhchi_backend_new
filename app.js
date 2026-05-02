@@ -177,6 +177,9 @@ app.use((req, res) => {
   res.status(404).json({ success: false, message: `Route ${req.originalUrl} not found` });
 });
 
+// ─── Global Error Handler ─────────────────────────────────────
+app.use(errorHandler);
+
 // ─── Global Crash Logging ──────────────────────────────────────
 process.on('uncaughtException', (err) => {
   logger.error(`🔥 UNCAUGHT EXCEPTION: ${err.message}`);

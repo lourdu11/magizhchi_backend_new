@@ -24,6 +24,19 @@ const verifyEmailConfig = async () => {
       logger.error('❌ BREVO_API_KEY not set in environment');
       return false;
     }
+    
+    // Actually verify the key with Brevo
+    const response = await fetch('https://api.brevo.com/v3/account', {
+      method: 'GET',
+      headers: { 'api-key': apiKey, 'Accept': 'application/json' }
+    });
+    
+    if (!response.ok) {
+      const err = await response.json();
+      logger.error(`❌ Brevo API Key Invalid: ${JSON.stringify(err)}`);
+      return false;
+    }
+
     logger.info('✅ Brevo API Ready: Connected successfully');
     return true;
   } catch (err) {
