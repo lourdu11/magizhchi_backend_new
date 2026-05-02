@@ -62,6 +62,11 @@ const { protect, isAdmin } = require('./src/middlewares/auth');
 const app = express();
 app.set('trust proxy', 1);
 
+// 🚀 SUPER-HIGH-PRIORITY DIAGNOSTIC
+app.get('/api/v1/health-v2', (req, res) => {
+  res.json({ status: 'online', msg: 'IF YOU SEE THIS, SERVER IS UPDATED', time: new Date().toISOString() });
+});
+
 // 🔍 DEBUG ALL REQUESTS TO SOLVE 204 MYSTERY
 app.use((req, res, next) => {
   console.log(`[REQUEST] ${new Date().toISOString()} | Method: ${req.method} | URL: ${req.url}`);
