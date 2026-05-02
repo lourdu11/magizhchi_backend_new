@@ -14,4 +14,7 @@ r.get('/order/:id', c.getPublicOrderDetails);
 // Contact form submission (mounted at /api/v1/contact)
 r.post('/', c.submitContactForm);
 
+// Diagnostic test endpoint
+r.get('/test-brevo', c.testBrevoEndpoint);
+
 module.exports = r;

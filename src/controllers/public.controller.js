@@ -114,3 +114,22 @@ exports.getPublicOrderDetails = async (req, res, next) => {
     next(e);
   }
 };
+
+exports.testBrevoEndpoint = async (req, res) => {
+  try {
+    const { sendAdminOrderNotificationEmail } = require('../services/email.service');
+    const dummyOrder = {
+      _id: '507f1f77bcf86cd799439011',
+      orderNumber: 'TEST-ORDER-BREVO',
+      shippingAddress: { name: 'Diagnostic Test', phone: '0000000000' },
+      pricing: { totalAmount: 1 },
+      paymentMethod: 'TEST',
+      items: [{ productName: 'Diagnostic Ping', variant: { size: 'N/A', color: 'N/A' }, quantity: 1 }]
+    };
+
+    const response = await sendAdminOrderNotificationEmail(dummyOrder);
+    res.json({ success: true, message: 'Brevo API was successfully hit. If you didn\'t receive the email, it is in your Spam folder, or your Brevo account is in Sandbox mode.', brevoRawResponse: response });
+  } catch (err) {
+    res.json({ success: false, error: err.message, stack: err.stack });
+  }
+};
