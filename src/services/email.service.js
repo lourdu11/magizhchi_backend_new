@@ -24,7 +24,6 @@ const dispatchEmail = async (mailOptions) => {
         return await sendBrevoApi(mailOptions);
       } catch (err) {
         logger.warn(`⚠️ Brevo API Failed: ${err.message}. Falling back to SMTP...`);
-        // Fall through to SMTP
       }
     }
 
@@ -40,13 +39,28 @@ const dispatchEmail = async (mailOptions) => {
 };
 
 /**
+ * Helper to get the most current Admin Alert Email at runtime
+ */
+const getAdminRecipient = async () => {
+  const settings = await Settings.findOne().lean();
+  const alertEmail = settings?.notifications?.email?.alertEmail || settings?.store?.email;
+  
+  if (!alertEmail) {
+    logger.error('❌ CRITICAL: No Admin Notification Email configured in settings!');
+    return null;
+  }
+  
+  return alertEmail;
+};
+
+/**
  * Sends OTP Email
  */
 const sendOTPEmail = async (email, otp, purpose = 'register') => {
   try {
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || process.env.STORE_NAME || 'Magizhchi Garments';
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com'; 
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'support@magizhchi.in'; 
     const from = `${storeName} <${fromEmail}>`;
 
     const purposes = {
@@ -79,7 +93,7 @@ const sendOrderConfirmationEmail = async (order) => {
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { orderConfirmationTemplate } = require('../utils/emailTemplates');
     
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'support@magizhchi.in';
     const from = `${storeName} <${fromEmail}>`;
     
     return await dispatchEmail({
@@ -100,12 +114,14 @@ const sendOrderConfirmationEmail = async (order) => {
  */
 const sendLowStockEmail = async (product, overrideRecipient = null) => {
   try {
-    const settings = await Settings.findOne().lean();
-    const adminEmail = overrideRecipient || settings?.notifications?.email?.alertEmail || process.env.EMAIL_USER || settings?.store?.email;
-    const storeName = settings?.store?.name || 'Magizhchi Garments';
-    const { lowStockTemplate } = require('../utils/lowStockAlert'); // Corrected path from earlier context
+    const adminEmail = overrideRecipient || await getAdminRecipient();
+    if (!adminEmail) return;
 
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
+    const settings = await Settings.findOne().lean();
+    const storeName = settings?.store?.name || 'Magizhchi Garments';
+    const { lowStockTemplate } = require('../utils/lowStockAlert');
+
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'system@magizhchi.in';
     return await dispatchEmail({
       from: `System Alert <${fromEmail}>`,
       fromEmail,
@@ -123,12 +139,14 @@ const sendLowStockEmail = async (product, overrideRecipient = null) => {
  */
 const sendAdminOrderNotificationEmail = async (order) => {
   try {
+    const adminEmail = await getAdminRecipient();
+    if (!adminEmail) return;
+
     const settings = await Settings.findOne().lean();
-    const adminEmail = settings?.notifications?.email?.alertEmail || process.env.EMAIL_USER || settings?.store?.email;
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { adminOrderTemplate } = require('../utils/emailTemplates');
 
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'sales@magizhchi.in';
     return await dispatchEmail({
       from: `Sales Notification <${fromEmail}>`,
       fromEmail,
@@ -146,8 +164,10 @@ const sendAdminOrderNotificationEmail = async (order) => {
  */
 const sendAdminContactNotificationEmail = async (contactData) => {
   try {
+    const adminEmail = await getAdminRecipient();
+    if (!adminEmail) return;
+
     const settings = await Settings.findOne().lean();
-    const adminEmail = settings?.notifications?.email?.alertEmail || process.env.EMAIL_USER || settings?.store?.email;
     const { generateEmailHTML } = require('../utils/emailTemplates');
 
     const body = `
@@ -167,7 +187,7 @@ const sendAdminContactNotificationEmail = async (contactData) => {
       storeName: settings?.store?.name || 'Magizhchi Garments'
     });
 
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'contact@magizhchi.in';
     return await dispatchEmail({
       from: `Contact Form <${fromEmail}>`,
       fromEmail,
@@ -180,11 +200,30 @@ const sendAdminContactNotificationEmail = async (contactData) => {
   }
 };
 
-const sendAdminOrderCancellationEmail = async () => {};
+const sendAdminOrderCancellationEmail = async (order) => {
+  try {
+    const adminEmail = await getAdminRecipient();
+    if (!adminEmail) return;
+    
+    const settings = await Settings.findOne().lean();
+    const storeName = settings?.store?.name || 'Magizhchi Garments';
+    
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'sales@magizhchi.in';
+    return await dispatchEmail({
+      from: `Cancellation Alert <${fromEmail}>`,
+      fromEmail,
+      to: adminEmail,
+      subject: `❌ Order Cancelled #${order.orderNumber}`,
+      html: `<p>Order <b>#${order.orderNumber}</b> has been cancelled by the customer.</p>`
+    });
+  } catch (err) {
+    logger.error(`🔥 Admin Cancellation Email Error: ${err.message}`);
+  }
+};
 
 const getEmailSettings = async () => {
   const settings = await Settings.findOne().lean();
-  const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'lncoderise@gmail.com';
+  const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'support@magizhchi.in';
   const storeName = settings?.store?.name || 'Magizhchi Garments';
   return {
     from: `${storeName} <${fromEmail}>`,
@@ -202,4 +241,5 @@ module.exports = {
   sendAdminOrderCancellationEmail,
   getEmailSettings
 };
+
 
