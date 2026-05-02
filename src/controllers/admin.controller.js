@@ -701,7 +701,12 @@ exports.testNotifications = async (req, res, next) => {
     // Always read FRESH from DB — never use stale frontend form data
     const settings = await Settings.findOne().lean();
     const alertEmail = settings?.notifications?.email?.alertEmail?.trim().toLowerCase();
-    logger.info(`🧪 Test Notification: type=${type}, alertEmail=${alertEmail}`);
+    logger.info(`🧪 Test Notification Diagnostic:`, {
+      type,
+      alertEmail,
+      dbMethod: settings?.notifications?.orderNotifications?.method,
+      dbEnabled: settings?.notifications?.orderNotifications?.enabled
+    });
 
     const dummyOrder = {
       _id: '507f1f77bcf86cd799439011',
@@ -793,6 +798,8 @@ exports.testNotifications = async (req, res, next) => {
 
     // If any email failed, return 207 so frontend shows the error message
     const emailFailed = Object.values(results).find(r => r && !r.success);
+    logger.info(`🧪 Test Notification results:`, results);
+    
     if (emailFailed) {
       return res.status(207).json({ success: false, message: emailFailed.error, results });
     }
@@ -800,4 +807,3 @@ exports.testNotifications = async (req, res, next) => {
     return ApiResponse.success(res, results, 'Test alerts sent successfully! Check your inbox.');
   } catch (error) { next(error); }
 };
-
