@@ -76,6 +76,14 @@ const getTransporter = async () => {
 
 const verifyEmailConfig = async () => {
   try {
+    const host = process.env.EMAIL_HOST || '';
+    const hasBrevoKey = process.env.BREVO_API_KEY || (process.env.EMAIL_PASSWORD && process.env.EMAIL_PASSWORD.trim().startsWith('xkeysib-'));
+    
+    if (host === 'api.brevo.com' || hasBrevoKey) {
+      logger.info('✅ Email Ready: [Brevo API Mode Active]');
+      return true;
+    }
+
     logger.info('📧 Email: Verifying SMTP configuration...');
     const transporter = await getTransporter();
     
@@ -83,10 +91,8 @@ const verifyEmailConfig = async () => {
     transporter.verify().then(() => {
       logger.info('✅ Email Ready: [SMTP Connected]');
     }).catch(err => {
-      const host = process.env.EMAIL_HOST || '';
-      // If we are using API modes, we don't care about SMTP errors
-      if (host === 'smtp.resend.com' || host === 'api.brevo.com') {
-        logger.info(`ℹ️  SMTP port blocked, but ${host === 'api.brevo.com' ? 'Brevo' : 'Resend'} API is active. Emails will still work.`);
+      if (host === 'smtp.resend.com') {
+        logger.info('ℹ️  SMTP port blocked, but Resend API is active.');
       } else {
         logger.error(`❌ Email Error: ${err.message}`);
       }
