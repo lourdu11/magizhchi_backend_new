@@ -81,10 +81,10 @@ const sendOrderConfirmationEmail = async (order) => {
 /**
  * Sends Low Stock Alert to Admin
  */
-const sendLowStockEmail = async (product) => {
+const sendLowStockEmail = async (product, overrideRecipient = null) => {
   try {
     const settings = await Settings.findOne().lean();
-    const adminEmail = settings?.notifications?.adminEmail || 'lncoderise@gmail.com';
+    const adminEmail = overrideRecipient || settings?.notifications?.email?.alertEmail || 'lncoderise@gmail.com';
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { lowStockTemplate } = require('../utils/emailTemplates');
 
@@ -109,7 +109,7 @@ const sendLowStockEmail = async (product) => {
 const sendAdminOrderNotificationEmail = async (order) => {
   try {
     const settings = await Settings.findOne().lean();
-    const adminEmail = settings?.notifications?.adminEmail || 'lncoderise@gmail.com';
+    const adminEmail = settings?.notifications?.email?.alertEmail || 'lncoderise@gmail.com';
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { adminOrderTemplate } = require('../utils/emailTemplates');
 
@@ -134,7 +134,7 @@ const sendAdminOrderNotificationEmail = async (order) => {
 const sendAdminContactNotificationEmail = async (contactData) => {
   try {
     const settings = await Settings.findOne().lean();
-    const adminEmail = settings?.notifications?.adminEmail || 'lncoderise@gmail.com';
+    const adminEmail = settings?.notifications?.email?.alertEmail || 'lncoderise@gmail.com';
     const { generateEmailHTML } = require('../utils/emailTemplates');
 
     const body = `

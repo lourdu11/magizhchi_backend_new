@@ -69,7 +69,7 @@ const checkAndAlertLowStock = async (item, oldStock = null) => {
           if (recipients) {
             logger.info(`📧 Email Stock Alert: Sending to ${recipients}`);
             const { sendLowStockEmail } = require('../services/email.service');
-            await sendLowStockEmail(recipients, item, currentStock);
+            await sendLowStockEmail(item, recipients);
           } else {
             logger.warn('⚠️ No email recipients found for stock alert');
           }
