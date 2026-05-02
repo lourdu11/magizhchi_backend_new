@@ -39,18 +39,19 @@ const dispatchEmail = async (mailOptions) => {
 };
 
 /**
- * Helper to get the most current Admin Alert Email at runtime
+ * Helper to get the most current Admin Alert Email at runtime.
+ * NO FALLBACK — if not configured, returns null and skips sending.
  */
 const getAdminRecipient = async () => {
   const settings = await Settings.findOne().lean();
-  const alertEmail = settings?.notifications?.email?.alertEmail || settings?.store?.email;
-  
-  if (!alertEmail) {
-    logger.error('❌ CRITICAL: No Admin Notification Email configured in settings!');
+  const alertEmail = settings?.notifications?.email?.alertEmail;
+
+  if (!alertEmail || alertEmail.trim() === '') {
+    logger.error('❌ CRITICAL: No Admin Notification Email configured in settings. Email not sent.');
     return null;
   }
-  
-  return alertEmail;
+
+  return alertEmail.trim().toLowerCase();
 };
 
 /**
@@ -60,7 +61,13 @@ const sendOTPEmail = async (email, otp, purpose = 'register') => {
   try {
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || process.env.STORE_NAME || 'Magizhchi Garments';
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'support@magizhchi.in'; 
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM; 
+
+    if (!fromEmail) {
+      logger.error('❌ No FROM email configured. Cannot send OTP email.');
+      return;
+    }
+
     const from = `${storeName} <${fromEmail}>`;
 
     const purposes = {
@@ -93,7 +100,13 @@ const sendOrderConfirmationEmail = async (order) => {
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { orderConfirmationTemplate } = require('../utils/emailTemplates');
     
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'support@magizhchi.in';
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
+    
+    if (!fromEmail) {
+      logger.error('❌ No FROM email configured. Cannot send order confirmation.');
+      return;
+    }
+
     const from = `${storeName} <${fromEmail}>`;
     
     return await dispatchEmail({
@@ -121,7 +134,13 @@ const sendLowStockEmail = async (product, overrideRecipient = null) => {
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { lowStockTemplate } = require('../utils/lowStockAlert');
 
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'system@magizhchi.in';
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
+
+    if (!fromEmail) {
+      logger.error('❌ No FROM email configured. Cannot send low stock alert.');
+      return;
+    }
+
     return await dispatchEmail({
       from: `System Alert <${fromEmail}>`,
       fromEmail,
@@ -146,7 +165,13 @@ const sendAdminOrderNotificationEmail = async (order) => {
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const { adminOrderTemplate } = require('../utils/emailTemplates');
 
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'sales@magizhchi.in';
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
+
+    if (!fromEmail) {
+      logger.error('❌ No FROM email configured. Cannot send admin order notification.');
+      return;
+    }
+
     return await dispatchEmail({
       from: `Sales Notification <${fromEmail}>`,
       fromEmail,
@@ -187,7 +212,13 @@ const sendAdminContactNotificationEmail = async (contactData) => {
       storeName: settings?.store?.name || 'Magizhchi Garments'
     });
 
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'contact@magizhchi.in';
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
+
+    if (!fromEmail) {
+      logger.error('❌ No FROM email configured. Cannot send admin contact notification.');
+      return;
+    }
+
     return await dispatchEmail({
       from: `Contact Form <${fromEmail}>`,
       fromEmail,
@@ -208,7 +239,13 @@ const sendAdminOrderCancellationEmail = async (order) => {
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     
-    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'sales@magizhchi.in';
+    const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
+
+    if (!fromEmail) {
+      logger.error('❌ No FROM email configured. Cannot send admin order cancellation alert.');
+      return;
+    }
+
     return await dispatchEmail({
       from: `Cancellation Alert <${fromEmail}>`,
       fromEmail,
@@ -223,10 +260,10 @@ const sendAdminOrderCancellationEmail = async (order) => {
 
 const getEmailSettings = async () => {
   const settings = await Settings.findOne().lean();
-  const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM || 'support@magizhchi.in';
+  const fromEmail = settings?.notifications?.email?.user || process.env.EMAIL_FROM;
   const storeName = settings?.store?.name || 'Magizhchi Garments';
   return {
-    from: `${storeName} <${fromEmail}>`,
+    from: fromEmail ? `${storeName} <${fromEmail}>` : null,
     fromEmail,
     storeName
   };
@@ -241,5 +278,6 @@ module.exports = {
   sendAdminOrderCancellationEmail,
   getEmailSettings
 };
+
 
 

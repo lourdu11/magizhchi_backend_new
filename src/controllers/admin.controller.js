@@ -600,7 +600,7 @@ exports.updateSettings = async (req, res, next) => {
         const dummyOrder = {
           _id: '507f1f77bcf86cd799439011',
           orderNumber: 'TEST-ORDER-999',
-          shippingAddress: { name: 'Test Customer', phone: settings.notifications?.whatsapp?.adminPhone || '9384765475' },
+          shippingAddress: { name: 'Test Customer', phone: settings.notifications?.whatsapp?.adminPhone },
           pricing: { totalAmount: 1500 },
           paymentMethod: 'UPI',
           items: [{ productName: 'Premium Cotton Shirt', variant: { size: 'XL', color: 'White' }, quantity: 1 }]
@@ -690,8 +690,10 @@ exports.testNotifications = async (req, res, next) => {
     // 1. Test WhatsApp
     if (type === 'all' || type === 'whatsapp') {
       try {
-        const targetPhone = phone || (await Settings.findOne())?.notifications?.whatsapp?.adminPhone || process.env.STORE_PHONE;
-        if (!targetPhone) throw new Error('No target phone number provided or found in settings');
+        const settings = await Settings.findOne();
+        // ✅ FIXED: No env var fallback — must be configured in settings
+        const targetPhone = phone || settings?.notifications?.whatsapp?.adminPhone;
+        if (!targetPhone) throw new Error('No Admin WhatsApp number configured in Settings → Notifications');
         
         await whatsapp.sendMessage(targetPhone, testMsg);
         results.whatsapp = { success: true, message: `Test message sent to ${targetPhone}` };
@@ -705,9 +707,10 @@ exports.testNotifications = async (req, res, next) => {
     if (type === 'all' || type === 'email') {
       try {
         const settings = await Settings.findOne();
-        const targetEmail = settings?.notifications?.email?.alertEmail || settings?.store?.email;
+        // ✅ FIXED: No store.email fallback — only alertEmail is the source of truth
+        const targetEmail = settings?.notifications?.email?.alertEmail?.trim().toLowerCase();
         
-        if (!targetEmail) throw new Error('No Admin Notification Email configured in settings');
+        if (!targetEmail) throw new Error('No Admin Notification Email configured in Settings → Notifications');
 
         const { getTransporter } = require('../config/email');
         const transporter = await getTransporter();
@@ -717,7 +720,7 @@ exports.testNotifications = async (req, res, next) => {
           from,
           to: targetEmail,
           subject: '🧪 Magizhchi Notification Test',
-          text: `This is a test email to verify your SMTP settings.\nSent at: ${new Date().toLocaleString()}`,
+          text: `This is a test email.\nSent at: ${new Date().toLocaleString()}`,
           html: `<h3>🧪 Magizhchi Notification Test</h3><p>Your SMTP settings are working correctly.</p><p>Sent at: ${new Date().toLocaleString()}</p>`
         });
         results.email = { success: true, message: `Test email sent to ${targetEmail}` };
