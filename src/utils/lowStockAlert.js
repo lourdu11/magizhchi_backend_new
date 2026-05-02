@@ -62,18 +62,11 @@ const checkAndAlertLowStock = async (item, oldStock = null) => {
 
       if (method === 'email' || method === 'both') {
         try {
-          const { alertEmail } = settings.notifications.email;
-          const recipients = alertEmail || settings.store?.email || process.env.EMAIL_USER;
-
-          if (recipients) {
-            logger.info(`📧 Email Stock Alert: Sending to ${recipients}`);
-            const { sendLowStockEmail } = require('../services/email.service');
-            await sendLowStockEmail(item, recipients);
-          } else {
-            logger.warn('⚠️ No email recipients found for stock alert');
-          }
+          logger.info('📧 Email Stock Alert: Triggering dynamic dispatch');
+          const { sendLowStockEmail } = require('../services/email.service');
+          await sendLowStockEmail(item);
         } catch (e) {
-          logger.error(`❌ Email Test Alert Failed: ${e.message}`);
+          logger.error(`❌ Email Stock Alert Failed: ${e.message}`);
         }
       }
     } else {

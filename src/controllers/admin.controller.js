@@ -704,8 +704,10 @@ exports.testNotifications = async (req, res, next) => {
     // 2. Test Email
     if (type === 'all' || type === 'email') {
       try {
-        const targetEmail = email || (await Settings.findOne())?.notifications?.email?.alertEmail || process.env.EMAIL_USER;
-        if (!targetEmail) throw new Error('No target email address provided or found in settings');
+        const settings = await Settings.findOne();
+        const targetEmail = settings?.notifications?.email?.alertEmail || settings?.store?.email;
+        
+        if (!targetEmail) throw new Error('No Admin Notification Email configured in settings');
 
         const { getTransporter } = require('../config/email');
         const transporter = await getTransporter();
