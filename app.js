@@ -196,11 +196,21 @@ app.use((req, res) => {
 // ─── Global Error Handler ─────────────────────────────────────
 // Diagnostic Health Check
 app.get('/api/v1/health-v2', (req, res) => {
-  res.json({ 
-    status: 'online', 
-    version: 'V2-READY', 
-    timestamp: new Date().toISOString() 
-  });
+  try {
+    const version = fs.readFileSync(path.join(__dirname, 'VERSION.txt'), 'utf8');
+    res.json({ 
+      status: 'online', 
+      version: version.trim(), 
+      timestamp: new Date().toISOString() 
+    });
+  } catch (err) {
+    res.json({ 
+      status: 'online', 
+      version: 'V2-PENDING', 
+      error: err.message,
+      timestamp: new Date().toISOString() 
+    });
+  }
 });
 
 app.use(errorHandler);
