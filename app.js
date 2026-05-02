@@ -76,6 +76,18 @@ app.use(helmet({
     },
   },
 }));
+// Force 200 OK for all OPTIONS requests to prevent "204 No Content" confusion
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-rtb-fingerprint-id, request-id');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    return res.status(200).send();
+  }
+  next();
+});
+
 app.use(cors({
   origin: [
     'https://magizhchigarments.vercel.app',
