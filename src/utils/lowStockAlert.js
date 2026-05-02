@@ -63,8 +63,7 @@ const checkAndAlertLowStock = async (item, oldStock = null) => {
       if (method === 'email' || method === 'both') {
         try {
           const { alertEmail } = settings.notifications.email;
-          const storeEmail = settings.store?.email || process.env.EMAIL_USER;
-          const recipients = [...new Set([alertEmail, storeEmail].filter(Boolean))].join(', ');
+          const recipients = alertEmail || settings.store?.email || process.env.EMAIL_USER;
 
           if (recipients) {
             logger.info(`📧 Email Stock Alert: Sending to ${recipients}`);
