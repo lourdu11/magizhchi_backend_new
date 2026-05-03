@@ -179,7 +179,8 @@ exports.getAdminProducts = async (req, res, next) => {
       .sort(sortMap[sort] || { createdAt: -1 })
       .skip(skip)
       .limit(Number(limit))
-      .select('-__v');
+      .select('-__v')
+      .lean();
 
     const total = await Product.countDocuments(query);
 
@@ -223,7 +224,7 @@ exports.getAdminProducts = async (req, res, next) => {
 // GET /products/admin/:id (Admin)
 exports.getAdminProductById = async (req, res, next) => {
   try {
-    const product = await Product.findById(req.params.id).populate('category', 'name slug');
+    const product = await Product.findById(req.params.id).populate('category', 'name slug').lean();
     if (!product) return ApiResponse.notFound(res, 'Product not found');
     return ApiResponse.success(res, { product });
   } catch (error) { next(error); }
@@ -246,7 +247,7 @@ exports.getProduct = async (req, res, next) => {
     // 1. Try finding by Slug first (Standard Product)
     const pQuery = { slug };
     if (isPOS !== 'true') pQuery.isActive = true;
-    product = await Product.findOne(pQuery).populate('category', 'name slug').select('-costPrice -__v');
+    product = await Product.findOne(pQuery).populate('category', 'name slug').select('-costPrice -__v').lean({ virtuals: true });
 
     if (!product) {
       // 2. Try finding by Barcode in Inventory (Crucial for POS Scanning)
@@ -360,6 +361,8 @@ exports.searchProducts = async (req, res, next) => {
     }
 
     const products = await Product.find(query)
+      .select('name sku slug images sellingPrice isActive')
+      .lean();
 
     // For search results, we can just return the display profiles
     // The frontend usually navigates to details where we fetch live stock

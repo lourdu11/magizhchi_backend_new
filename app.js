@@ -33,6 +33,19 @@ const mongoSanitize = (req, res, next) => {
   next();
 };
 
+const app = express();
+app.set('trust proxy', 1);
+
+// ─── Middleware ────────────────────────────────────────────────
+app.use(compression()); // Enable Gzip/Brotli compression
+
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-rtb-fingerprint-id', 'request-id']
+}));
+
 const errorHandler = require('./src/middlewares/errorHandler');
 const { defaultLimiter } = require('./src/middlewares/rateLimiter');
 const logger = require('./src/utils/logger');
@@ -54,13 +67,6 @@ const publicRoutes = require('./src/routes/public.routes');
 const publicController = require('./src/controllers/public.controller');
 const upload = require('./src/middlewares/upload.middleware');
 const { protect, isAdmin } = require('./src/middlewares/auth');
-// settingsRoutes removed as it is now part of adminRoutes
-
-
-
-
-const app = express();
-app.set('trust proxy', 1);
 
 // 🚀 SUPER-HIGH-PRIORITY DIAGNOSTIC
 app.get('/api/v1/health-v2', (req, res) => {
