@@ -115,6 +115,7 @@ orderSchema.index({ paymentStatus: 1 });
 orderSchema.index({ createdAt: -1 });
 orderSchema.index({ 'items.productId': 1 });
 orderSchema.index({ 'items.inventoryId': 1 });
+orderSchema.index({ orderNumber: 1, 'shippingAddress.name': 1, 'shippingAddress.phone': 1 });
 
 
 module.exports = mongoose.model('Order', orderSchema);

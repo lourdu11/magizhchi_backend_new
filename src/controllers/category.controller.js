@@ -5,6 +5,10 @@ const slugify = require('slugify');
 exports.getCategories = async (req, res, next) => {
   try {
     const categories = await Category.find({ isActive: true }).sort({ displayOrder: 1 });
+    
+    // Cache for 24 hours (86400s)
+    res.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=172800');
+    
     return ApiResponse.success(res, { categories });
   } catch (error) { next(error); }
 };

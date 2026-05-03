@@ -141,6 +141,9 @@ exports.getProducts = async (req, res, next) => {
     const total = results.metadata[0]?.total || 0;
     const products = results.data;
 
+    // Cache for 1 hour (3600s), allow stale for 1 day (86400s)
+    res.set('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
+
     return ApiResponse.paginated(res, products, {
       page: Number(page), limit: Number(limit),
       total, pages: Math.ceil(total / Number(limit)),
@@ -330,6 +333,9 @@ exports.getProduct = async (req, res, next) => {
     if (!isVirtual) {
       Product.findByIdAndUpdate(product._id, { $inc: { viewCount: 1 } }).exec();
     }
+    
+    // Cache for 1 hour
+    res.set('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
     
     return ApiResponse.success(res, { product: productObj });
   } catch (error) { next(error); }

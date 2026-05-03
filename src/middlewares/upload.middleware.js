@@ -7,7 +7,10 @@ const storage = new CloudinaryStorage({
   params: {
     folder: 'magizhchi/products',
     allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
-    transformation: [{ width: 1000, height: 1000, crop: 'limit' }],
+    transformation: [
+      { width: 1200, height: 1200, crop: 'limit' },
+      { fetch_format: 'auto', quality: 'auto' }
+    ],
   },
 });
 
