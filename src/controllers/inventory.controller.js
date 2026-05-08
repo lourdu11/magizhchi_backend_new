@@ -5,8 +5,8 @@ const ApiResponse = require('../utils/apiResponse');
 // ── GET /admin/inventory ───────────────────────────────────────────────────────
 exports.getInventory = async (req, res, next) => {
   try {
-    const { search, category, onlineEnabled, offlineEnabled, status, productRef, sku, page = 1, limit = 50 } = req.query;
-    const query = {};
+    const { search, category, onlineEnabled, offlineEnabled, status, productRef, sku, page = 1, limit = 50, includeDeleted = 'false' } = req.query;
+    const query = { isDeleted: includeDeleted === 'true' ? true : { $ne: true } };
 
     if (productRef) query.productRef = productRef;
     if (sku) query.sku = sku;
@@ -117,20 +117,24 @@ exports.getLowStock = async (req, res, next) => {
 // ── GET /admin/inventory/stats ────────────────────────────────────────────────
 exports.getInventoryStats = async (req, res, next) => {
   try {
-    const all = await Inventory.find().lean({ virtuals: true });
+    const all = await Inventory.find({ isDeleted: { $ne: true } }).lean({ virtuals: true });
+    
+    // Filter only those with physical stock for core metrics
+    const activeWithStock = all.filter(i => (i.totalStock || 0) > 0);
+
     const stats = {
-      totalSKUs: all.length,
-      totalStockValue: all.reduce((sum, i) => sum + i.totalStock * i.purchasePrice, 0),
+      totalSKUs: activeWithStock.length, // Only count SKUs that actually have items
+      totalStockValue: activeWithStock.reduce((sum, i) => sum + (i.totalStock || 0) * (i.purchasePrice || 0), 0),
       onlineOnly:  all.filter(i => i.onlineEnabled && !i.offlineEnabled).length,
       offlineOnly: all.filter(i => !i.onlineEnabled && i.offlineEnabled).length,
       both:        all.filter(i => i.onlineEnabled && i.offlineEnabled).length,
       inactive:    all.filter(i => !i.onlineEnabled && !i.offlineEnabled).length,
       outOfStock:  all.filter(i => {
-        const a = Math.max(0, i.totalStock - i.onlineSold - i.offlineSold - (i.reservedStock || 0) + i.returned - i.damaged);
+        const a = Math.max(0, (i.totalStock || 0) - (i.onlineSold || 0) - (i.offlineSold || 0) - (i.reservedStock || 0) + (i.returned || 0) - (i.damaged || 0));
         return a === 0;
       }).length,
       lowStock: all.filter(i => {
-        const a = Math.max(0, i.totalStock - i.onlineSold - i.offlineSold - (i.reservedStock || 0) + i.returned - i.damaged);
+        const a = Math.max(0, (i.totalStock || 0) - (i.onlineSold || 0) - (i.offlineSold || 0) - (i.reservedStock || 0) + (i.returned || 0) - (i.damaged || 0));
         return a > 0 && a <= (i.lowStockThreshold || 5);
       }).length,
     };
@@ -359,11 +363,54 @@ exports.linkProduct = async (req, res, next) => {
 // ── DELETE /admin/inventory/:id ──────────────────────────────────────────────
 exports.deleteInventoryItem = async (req, res, next) => {
   try {
-    const item = await Inventory.findByIdAndDelete(req.params.id);
+    const item = await Inventory.findById(req.params.id);
     if (!item) return ApiResponse.notFound(res, 'Inventory item not found');
-    return ApiResponse.success(res, null, 'Inventory row deleted');
+
+    // Check for any historical activity (sales or movements)
+    const hasSalesHistory = (item.onlineSold || 0) > 0 || (item.offlineSold || 0) > 0;
+    const hasMovements = await StockMovement.exists({ inventoryId: item._id });
+
+    const parentProductRef = item.productRef;
+
+    if (hasSalesHistory || hasMovements) {
+      // SOFT DELETE — Archive variant, preserve audit trail
+      item.isDeleted = true;
+      item.deletedAt = new Date();
+      await item.save();
+
+      // Check if parent product has remaining active variants
+      if (parentProductRef) {
+        const remainingVariants = await Inventory.countDocuments({
+          productRef: parentProductRef,
+          isDeleted: { $ne: true }
+        });
+        if (remainingVariants === 0) {
+          // No active variants left — deactivate the product from web catalog
+          await require('../models/Product').findByIdAndUpdate(parentProductRef, { isActive: false });
+        }
+      }
+
+      return ApiResponse.success(res, { archived: true }, 'Variant archived (history preserved for audit)');
+    }
+
+    // HARD DELETE — No history, safe to fully remove
+    await Inventory.findByIdAndDelete(req.params.id);
+
+    // Check if parent product has remaining active variants
+    if (parentProductRef) {
+      const remainingVariants = await Inventory.countDocuments({
+        productRef: parentProductRef,
+        isDeleted: { $ne: true }
+      });
+      if (remainingVariants === 0) {
+        await require('../models/Product').findByIdAndUpdate(parentProductRef, { isActive: false });
+      }
+    }
+
+    return ApiResponse.success(res, { archived: false }, 'Variant permanently deleted');
   } catch (error) { next(error); }
 };
+
 
 exports.getByBarcode = async (req, res, next) => {
   try {
@@ -412,7 +459,31 @@ exports.createInventoryItem = async (req, res, next) => {
     }
 
     // 3. Auto-generate SKU and Barcode if missing
-    const finalSku = sku || `${productName.slice(0,3)}-${color.slice(0,3)}-${size}`.toUpperCase().replace(/\s+/g, '');
+    let finalSku = sku;
+    if (!finalSku) {
+      const words = productName.trim().split(/\s+/).filter(Boolean);
+      let initials = 'PRD';
+      if (words.length === 1) {
+        initials = words[0].slice(0, 3).toUpperCase();
+      } else if (words.length >= 2) {
+        const firstInit = words[0][0].toUpperCase();
+        const secondWord = words[1].toLowerCase();
+        let secondInit = words[1][0].toUpperCase();
+        if (secondWord.startsWith('sh')) {
+          secondInit = 'SH';
+        } else if (words.length > 2) {
+          secondInit += words[2][0].toUpperCase();
+        }
+        initials = (firstInit + secondInit).toUpperCase();
+      }
+      const skuBase = `${initials}-${size.trim()}`.toUpperCase().replace(/\s+/g, '');
+      const totalCount = await Inventory.countDocuments({});
+      const sequenceSuffix = String(totalCount + 1).padStart(3, '0');
+      finalSku = `${skuBase}-${sequenceSuffix}`;
+    } else {
+      finalSku = finalSku.trim().toUpperCase().replace(/\s+/g, '');
+    }
+
     const barcode = `MAG${Date.now().toString().slice(-8)}${Math.floor(Math.random()*100).toString().padStart(2, '0')}`;
 
     // 4. Inherit from Parent Product

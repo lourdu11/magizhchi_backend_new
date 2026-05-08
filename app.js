@@ -167,16 +167,9 @@ app.get('/api/v1/health', (req, res) => {
 // ─── API Routes ───────────────────────────────────────────────
 const API = '/api/v1';
 
-// User requested route for testing
-const notificationRoutes = require('./src/routes/notifications');
-app.use(API, notificationRoutes);
 
 // VIP Priority Routes (Procurement & Scanning)
 app.use(`${API}/admin/inventory`, protect, isAdmin, require('./src/routes/inventory.routes'));
-// 🚀 ABSOLUTE TEST ROUTE (FORCE)
-app.post('/api/v1/test-force', (req, res) => {
-  res.json({ success: true, message: 'FORCE SUCCESS - V3', timestamp: new Date().toISOString() });
-});
 
 app.use(`${API}/admin`, adminRoutes);
 
@@ -208,36 +201,6 @@ app.post(`${API}/upload`, protect, isAdmin, upload.single('image'), (req, res) =
 
 
 
-// ✅ [USER REQUESTED] FORCE TEST NOTIFICATION ROUTE
-app.post('/api/v1/test-force', async (req, res) => {
-  try {
-    const SibApiV3Sdk = require('sib-api-v3-sdk');
-    const client = SibApiV3Sdk.ApiClient.instance;
-    client.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
-
-    const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
-    
-    // Get alert email from DB or fallback
-    const Settings = require('./src/models/Settings');
-    const settings = await Settings.findOne().lean();
-    const adminEmail = settings?.notifications?.email?.alertEmail || 'lncoderise@gmail.com';
-    const senderEmail = process.env.EMAIL_USER;
-
-    const result = await emailApi.sendTransacEmail({
-      sender: { name: 'Magizhchi Admin', email: 'lncoderise@11134769.brevosend.com' },
-      to: [{ email: adminEmail }],
-      subject: '🚨 Test Order Alert (FORCE FIX)',
-      htmlContent: `<h2>Test Notification</h2><p>This alert was triggered manually from the Admin Settings.</p><p>Sent to: ${adminEmail}</p>`
-    });
-
-    res.json({
-      success: true,
-      data: { emailOrder: { messageId: result.messageId } }
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
 
 // Diagnostic Health Check
 app.get('/api/v1/health-v2', (req, res) => {

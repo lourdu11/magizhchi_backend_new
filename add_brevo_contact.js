@@ -1,13 +1,13 @@
 require('dotenv').config();
 
-// This script adds lourdufreefire@gmail.com as a Brevo contact
+// This script adds admin@magizhchi.in as a Brevo contact
 // so it can receive emails even when the account is in restricted mode
 
 const addBrevoContact = async () => {
   const apiKey = process.env.BREVO_API_KEY;
   if (!apiKey) { console.error('BREVO_API_KEY not set'); return; }
 
-  const emailToAdd = 'lourdufreefire@gmail.com';
+  const emailToAdd = 'admin@magizhchi.in';
 
   const response = await fetch('https://api.brevo.com/v3/contacts', {
     method: 'POST',

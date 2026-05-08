@@ -20,6 +20,7 @@ const billSchema = new mongoose.Schema(
     billNumber: { type: String, unique: true, required: true },
     billDate:   { type: Date, default: Date.now },
     staffId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    salesStaffId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     commissionAmount: { type: Number, default: 0 },
     customerDetails: {
       name: { type: String, trim: true },
@@ -56,6 +57,14 @@ const billSchema = new mongoose.Schema(
     notes:      String,
     isExchange: { type: Boolean, default: false },
     originalBillId: { type: mongoose.Schema.Types.ObjectId, ref: 'Bill' },
+    status: { 
+      type: String, 
+      enum: ['active', 'voided'], 
+      default: 'active' 
+    },
+    voidedReason: String,
+    voidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    voidedAt: Date,
   },
   { timestamps: true }
 );

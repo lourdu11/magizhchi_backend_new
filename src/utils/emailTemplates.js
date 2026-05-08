@@ -161,9 +161,78 @@ const adminOrderTemplate = (order, storeName) => {
   });
 };
 
+/**
+ * Template for Bill Receipt (Offline/POS)
+ */
+const billReceiptTemplate = (bill, storeName) => {
+  const itemsHtml = bill.items.map(item => `
+    <tr>
+      <td>
+        <b>${item.productName}</b><br/>
+        <span style="font-size:12px;color:#6b7280">${item.variant?.size || item.size} / ${item.variant?.color || item.color}</span>
+      </td>
+      <td class="text-right">${item.quantity}</td>
+      <td class="text-right">${formatCurrency(item.total)}</td>
+    </tr>
+  `).join('');
+
+  const body = `
+    <h2>Purchase Receipt</h2>
+    <p>Hi ${bill.customerDetails?.name || 'Customer'},</p>
+    <p>Thank you for shopping with us! Here is your official receipt for invoice <b>#${bill.billNumber}</b>.</p>
+    
+    <table class="order-table">
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th class="text-right">Qty</th>
+          <th class="text-right">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${itemsHtml}
+        <tr>
+          <td colspan="2" class="text-right summary-row">Subtotal</td>
+          <td class="text-right summary-row">${formatCurrency(bill.pricing.subtotal)}</td>
+        </tr>
+        ${bill.pricing.discount > 0 ? `
+        <tr>
+          <td colspan="2" class="text-right summary-row" style="color:#10b981">Discount</td>
+          <td class="text-right summary-row" style="color:#10b981">-${formatCurrency(bill.pricing.discount)}</td>
+        </tr>` : ''}
+        <tr>
+          <td colspan="2" class="text-right summary-row">Tax (GST)</td>
+          <td class="text-right summary-row">${formatCurrency(bill.pricing.gstAmount)}</td>
+        </tr>
+        <tr class="total-row">
+          <td colspan="2" class="text-right">Total Paid</td>
+          <td class="text-right">${formatCurrency(bill.pricing.totalAmount)}</td>
+        </tr>
+      </tbody>
+    </table>
+    
+    <div style="background-color:#f9fafb; padding:20px; border-radius:8px; margin-top:20px">
+      <p style="margin:0; font-size:12px; color:#6b7280; text-align:center">
+        <b>Payment Method:</b> ${bill.paymentMethod.toUpperCase()}<br/>
+        <b>Date:</b> ${new Date(bill.billDate).toLocaleDateString('en-IN')}<br/>
+        <b>Store:</b> ${storeName}
+      </p>
+    </div>
+  `;
+
+  return generateEmailHTML({
+    title: `Receipt #${bill.billNumber}`,
+    preheader: `Your receipt from ${storeName} is ready.`,
+    body,
+    storeName,
+    brandColor: '#111827' // Dark Charcoal
+  });
+};
+
 module.exports = {
   orderConfirmationTemplate,
   lowStockTemplate,
   adminOrderTemplate,
+  billReceiptTemplate,
   generateEmailHTML
 };

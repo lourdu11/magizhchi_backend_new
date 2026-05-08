@@ -7,19 +7,30 @@ const ApiResponse = require('../utils/apiResponse');
 // ── POST /admin/purchases ─────────────────────────────────────────────────────
 exports.createPurchase = async (req, res, next) => {
   try {
-    const { supplierId, supplierName, billNumber, items, pricing, paymentStatus, status, paidAmount, purchaseDate, notes } = req.body;
+    const { supplierId, supplierName, billNumber, items, pricing, paymentStatus, status, paidAmount, purchaseDate, notes, billImage } = req.body;
 
     if (!items || items.length === 0) {
       return ApiResponse.error(res, 'At least one item is required', 400);
     }
 
-    // 1. Generate Purchase Number
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-    const todayEnd   = new Date(); todayEnd.setHours(23, 59, 59, 999);
-    const countToday = await Purchase.countDocuments({ createdAt: { $gte: todayStart, $lte: todayEnd } });
-    const sequence   = (countToday + 1).toString().padStart(3, '0');
-    const dateStr    = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const purchaseNumber = `PUR-${dateStr}-${sequence}`;
+    // 1. Generate Purchase Number (ERP Sequential ID)
+    const now = new Date();
+    const year = now.getFullYear();
+    const startOfYear = new Date(year, 0, 1);
+    
+    // Find the latest purchase this year to get the next sequence
+    const latestPurchase = await Purchase.findOne({
+      createdAt: { $gte: startOfYear }
+    }).sort({ createdAt: -1 });
+
+    let sequence = 1;
+    if (latestPurchase && latestPurchase.purchaseNumber.startsWith(`PUR-${year}`)) {
+      const parts = latestPurchase.purchaseNumber.split('-');
+      const lastNum = parseInt(parts[parts.length - 1]);
+      if (!isNaN(lastNum)) sequence = lastNum + 1;
+    }
+
+    const purchaseNumber = `PUR-${year}-${String(sequence).padStart(4, '0')}`;
 
     // 2. Auto-calculate pricing from items (backend source of truth)
     let subtotal = 0;
@@ -46,6 +57,7 @@ exports.createPurchase = async (req, res, next) => {
       paymentStatus: paymentStatus || 'pending',
       purchaseDate:  purchaseDate || new Date(),
       notes,
+      billImage,
       performedBy: req.user._id,
     });
 
@@ -90,7 +102,7 @@ exports.updatePurchase = async (req, res, next) => {
     const oldPurchase = await Purchase.findById(id);
     if (!oldPurchase) return ApiResponse.notFound(res, 'Purchase not found');
 
-    const { supplierId, supplierName, billNumber, paymentStatus, status, paidAmount, purchaseDate, notes, items } = req.body;
+    const { supplierId, supplierName, billNumber, paymentStatus, status, paidAmount, purchaseDate, notes, items, billImage } = req.body;
 
     // 1. Rollback old stock if it was already received
     if (oldPurchase.status === 'received') {
@@ -119,14 +131,19 @@ exports.updatePurchase = async (req, res, next) => {
         subtotal += lineTotal;
         return { ...item, total: lineTotal, gstPercent: 0 };
       });
-      pricing = { subtotal, gstAmount: 0, totalAmount: subtotal };
+      
+      // Respect manual total override from frontend if present
+      const customTotal = req.body.pricing?.totalAmount;
+      const finalTotalAmount = (customTotal !== undefined && customTotal !== null) ? Number(customTotal) : subtotal;
+      pricing = { subtotal, gstAmount: 0, totalAmount: finalTotalAmount };
     }
 
     // 3. Update Purchase Record
     const updatedPurchase = await Purchase.findByIdAndUpdate(id, {
       billNumber, supplierName, supplierId, paymentStatus, status, paidAmount, purchaseDate, notes,
       items: processedItems,
-      pricing
+      pricing,
+      billImage
     }, { new: true });
 
     // 4. Apply new stock if status is received
@@ -154,17 +171,31 @@ async function syncPurchaseToInventory(purchase, userId) {
   const Product = require('../models/Product');
   console.log(`[Sync] Starting inventory sync for ${purchase.purchaseNumber}. Items: ${purchase.items?.length}`);
   for (const item of purchase.items) {
-    const productName = item.productName.trim();
-    const color = item.color.trim();
-    const size = item.size.trim();
+    const productName = (item.productName || '').trim();
+    const color = (item.color || '').trim();
+    const size = (item.size || '').trim();
 
-    // Find parent product
+    // 1. Find parent product (case-insensitive)
     const product = await Product.findOne({ name: { $regex: new RegExp('^' + productName + '$', 'i') } });
     
-    const filter = { productName, color, size };
+    const targetProductName = product ? product.name : productName;
+
+    // 2. Find existing inventory record case-insensitively to prevent duplicates (same box logic)
+    const existingInv = await Inventory.findOne({
+      productName: { $regex: new RegExp('^' + targetProductName + '$', 'i') },
+      color: { $regex: new RegExp('^' + color + '$', 'i') },
+      size: { $regex: new RegExp('^' + size + '$', 'i') }
+    });
+
+    // Use existing keys to match exactly, or setup insert filter with trimmed/normalized casing
+    const filter = existingInv ? { _id: existingInv._id } : {
+      productName: targetProductName,
+      color: color,
+      size: size
+    };
 
     const barcode = item.barcode || `MAG${Date.now().toString().slice(-8)}${Math.floor(Math.random()*100).toString().padStart(2, '0')}`;
-    const sku = item.sku || `${productName.slice(0,3)}-${color.slice(0,3)}-${size}`.toUpperCase().replace(/\s+/g, '');
+    const sku = item.sku || `${targetProductName.slice(0,3)}-${color.slice(0,3)}-${size}`.toUpperCase().replace(/\s+/g, '');
     
     const update = {
       $inc: { totalStock: item.quantity },
@@ -192,7 +223,7 @@ async function syncPurchaseToInventory(purchase, userId) {
     await StockMovement.create({
       productId: inv.productRef,
       inventoryId: inv._id,
-      variant: { size: item.size, color: item.color },
+      variant: { size: inv.size, color: inv.color },
       type: 'purchase',
       quantity: item.quantity,
       reason: `Purchase Recvd: ${purchase.purchaseNumber}`,
@@ -207,10 +238,14 @@ async function syncPurchaseToInventory(purchase, userId) {
 async function rollbackPurchaseInventory(purchase, userId) {
   console.log(`[Rollback] Starting inventory rollback for ${purchase.purchaseNumber}. Items: ${purchase.items?.length}`);
   for (const item of purchase.items) {
+    const productName = (item.productName || '').trim();
+    const color = (item.color || '').trim();
+    const size = (item.size || '').trim();
+
     const inv = await Inventory.findOne({
-      productName: item.productName.trim(),
-      color: item.color.trim(),
-      size: item.size.trim()
+      productName: { $regex: new RegExp('^' + productName + '$', 'i') },
+      color: { $regex: new RegExp('^' + color + '$', 'i') },
+      size: { $regex: new RegExp('^' + size + '$', 'i') }
     });
 
     if (inv) {
@@ -234,11 +269,15 @@ async function rollbackPurchaseInventory(purchase, userId) {
   }
 }
 
-// ── DELETE /admin/purchases/:id (ERP Rollback) ────────────────────────────────
+// ── DELETE /admin/purchases/:id (ERP Rollback + Soft Delete) ───────────────────
 exports.deletePurchase = async (req, res, next) => {
   try {
     const purchase = await Purchase.findById(req.params.id);
     if (!purchase) return ApiResponse.notFound(res, 'Purchase not found');
+
+    if (purchase.isDeleted) {
+      return ApiResponse.error(res, 'This purchase is already deleted/archived', 400);
+    }
 
     // IF RECEIVED: Must rollback stock and ledger
     if (purchase.status === 'received') {
@@ -254,17 +293,21 @@ exports.deletePurchase = async (req, res, next) => {
 
       // 2. Rollback Inventory Stock
       for (const item of purchase.items) {
+        const productName = (item.productName || '').trim();
+        const color = (item.color || '').trim();
+        const size = (item.size || '').trim();
+
         const inv = await Inventory.findOne({
-          productName: item.productName,
-          color: item.color,
-          size: item.size
+          productName: { $regex: new RegExp('^' + productName + '$', 'i') },
+          color: { $regex: new RegExp('^' + color + '$', 'i') },
+          size: { $regex: new RegExp('^' + size + '$', 'i') }
         });
 
         if (inv) {
           // ── PREVENT DELETION IF STOCK IS ALREADY SOLD ──
           const currentAvailable = (inv.totalStock + inv.returned) - (inv.onlineSold + inv.offlineSold + inv.damaged);
           if (currentAvailable < item.quantity) {
-            throw new Error(`Cannot delete purchase: ${item.quantity} units of ${item.productName} are required for rollback, but only ${currentAvailable} are available (likely sold).`);
+            return ApiResponse.error(res, `Cannot delete purchase: ${item.quantity} units of ${item.productName} are required for rollback, but only ${currentAvailable} are available (likely sold).`, 400);
           }
 
           const stockBefore = inv.totalStock;
@@ -288,8 +331,13 @@ exports.deletePurchase = async (req, res, next) => {
       }
     }
 
-    await Purchase.findByIdAndDelete(req.params.id);
-    return ApiResponse.success(res, null, 'Purchase deleted and stock rolled back');
+    // SOFT DELETE: Keep the record, mark as deleted
+    purchase.isDeleted = true;
+    purchase.deletedAt = new Date();
+    purchase.deletedBy = req.user._id;
+    await purchase.save();
+
+    return ApiResponse.success(res, null, 'Purchase archived and stock rolled back');
   } catch (error) { next(error); }
 };
 
@@ -297,12 +345,16 @@ exports.deletePurchase = async (req, res, next) => {
 exports.getPurchases = async (req, res, next) => {
   try {
     const { page = 1, limit = 20 } = req.query;
-    const query = {};
+    const query = { isDeleted: { $ne: true } };
     const skip  = (page - 1) * Number(limit);
 
     const [purchases, total] = await Promise.all([
       Purchase.find(query)
-        .populate('supplierId', 'name phone')
+        .populate({
+          path: 'supplierId',
+          select: 'name phone isDeleted',
+          model: 'Supplier'
+        })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit))
@@ -321,12 +373,15 @@ exports.getPurchases = async (req, res, next) => {
 exports.getSuppliers = async (req, res, next) => {
   try {
     const suppliers = await Supplier.aggregate([
-      { $match: { isActive: true } },
+      // Only include active, non-deleted suppliers in the hub to ensure data integrity
+      { $match: { isDeleted: false, isActive: true } },
       {
         $lookup: {
           from: 'purchases',
-          localField: '_id',
-          foreignField: 'supplierId',
+          let: { supplier_id: '$_id' },
+          pipeline: [
+            { $match: { $expr: { $and: [ { $eq: ['$supplierId', '$$supplier_id'] }, { $ne: ['$isDeleted', true] } ] } } }
+          ],
           as: 'purchaseRecords'
         }
       },
@@ -437,7 +492,37 @@ exports.deletePayment = async (req, res, next) => {
 // ── POST /admin/suppliers ─────────────────────────────────────────────────────
 exports.createSupplier = async (req, res, next) => {
   try {
-    const supplier = await Supplier.create(req.body);
+    const data = { ...req.body };
+    data.openingBalance = Number(data.openingBalance) || 0;
+
+    if (data.name) {
+      const trimmedName = data.name.trim();
+      const trimmedPhone = data.phone ? data.phone.trim() : '';
+
+      let existingSupplier = null;
+      if (trimmedName) {
+        existingSupplier = await Supplier.findOne({
+          name: { $regex: new RegExp("^" + trimmedName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") }
+        });
+      }
+
+      if (!existingSupplier && trimmedPhone) {
+        existingSupplier = await Supplier.findOne({ phone: trimmedPhone });
+      }
+
+      if (existingSupplier) {
+        existingSupplier.openingBalance += Number(data.openingBalance) || 0;
+        if (!existingSupplier.phone && data.phone) existingSupplier.phone = data.phone;
+        if (!existingSupplier.email && data.email) existingSupplier.email = data.email;
+        if (!existingSupplier.gstin && data.gstin) existingSupplier.gstin = data.gstin;
+        if (!existingSupplier.address && data.address) existingSupplier.address = data.address;
+
+        await existingSupplier.save();
+        return ApiResponse.success(res, existingSupplier, 'Supplier already exists, balance and details merged successfully');
+      }
+    }
+
+    const supplier = await Supplier.create(data);
     return ApiResponse.created(res, supplier, 'Supplier added successfully');
   } catch (error) { next(error); }
 };
@@ -445,25 +530,39 @@ exports.createSupplier = async (req, res, next) => {
 // ── PUT /admin/suppliers/:id ───────────────────────────────────────────
 exports.updateSupplier = async (req, res, next) => {
   try {
-    const supplier = await Supplier.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const data = { ...req.body };
+    data.openingBalance = Number(data.openingBalance) || 0;
+    const supplier = await Supplier.findByIdAndUpdate(req.params.id, data, { new: true });
     if (!supplier) return ApiResponse.notFound(res, 'Supplier not found');
     return ApiResponse.success(res, supplier, 'Supplier details updated');
   } catch (error) { next(error); }
 };
-// ── DELETE /admin/suppliers/:id ──────────────────────────────────────────
+// ── DELETE /admin/suppliers/:id (Archival Soft Delete) ───────────────────────
 exports.deleteSupplier = async (req, res, next) => {
   try {
     const supplierId = req.params.id;
 
     // 1. Check if supplier has any purchases
     const purchaseCount = await Purchase.countDocuments({ supplierId });
+    
     if (purchaseCount > 0) {
-      return ApiResponse.error(res, `Cannot delete supplier: ${purchaseCount} purchase records are linked to this partner. Deactivate them instead.`, 400);
+      // ── ARCHIVE (Soft Delete) ──────────────────────────────────────────────
+      // If history exists, we MUST archive them to preserve ledger/audit integrity
+      const supplier = await Supplier.findByIdAndUpdate(supplierId, { 
+        isActive: false, 
+        isDeleted: true,
+        deletedAt: new Date()
+      }, { new: true });
+      
+      if (!supplier) return ApiResponse.notFound(res, 'Supplier not found');
+      return ApiResponse.success(res, null, 'Supplier archived (procurement records preserved for audit)');
     }
 
+    // ── HARD DELETE ──────────────────────────────────────────────────────────
+    // If brand new with absolutely no history, we can wipe completely
     const supplier = await Supplier.findByIdAndDelete(supplierId);
     if (!supplier) return ApiResponse.notFound(res, 'Supplier not found');
 
-    return ApiResponse.success(res, null, 'Supplier removed successfully');
+    return ApiResponse.success(res, null, 'Supplier removed permanently');
   } catch (error) { next(error); }
 };

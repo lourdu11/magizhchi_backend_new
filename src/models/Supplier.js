@@ -18,11 +18,13 @@ const supplierSchema = new mongoose.Schema({
   payments: [{
     amount: { type: Number, required: true },
     date: { type: Date, default: Date.now },
-    method: { type: String, enum: ['Cash', 'UPI', 'Bank', 'Cheque'], default: 'Cash' },
+    method: { type: String, enum: ['Cash', 'UPI', 'Bank', 'Cheque', 'Purchase Settlement'], default: 'Cash' },
     referenceId: { type: String },
     note: { type: String }
   }],
   isActive: { type: Boolean, default: true },
+  isDeleted: { type: Boolean, default: false },
+  deletedAt: { type: Date },
 }, { 
   timestamps: true,
   toJSON: { virtuals: true },

@@ -6,7 +6,7 @@ const stockMovementSchema = new mongoose.Schema(
     inventoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Inventory' }, 
     variant: {
       size: { type: String, required: true },
-      color: { type: String, required: true },
+      color: { type: String },
     },
     type: {
       type: String,

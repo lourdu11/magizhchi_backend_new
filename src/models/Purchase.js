@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const purchaseItemSchema = new mongoose.Schema({
   productName: { type: String, required: true, trim: true },
   category:    { type: String, trim: true, default: 'Uncategorized' },
-  color:       { type: String, required: true, trim: true },
+  color:       { type: String, trim: true, default: '' },
   size:        { type: String, required: true, trim: true },
   quantity:    { type: Number, required: true, min: 1 },
   costPrice:   { type: Number, required: true, min: 0 },
@@ -31,7 +31,11 @@ const purchaseSchema = new mongoose.Schema(
     paymentStatus: { type: String, enum: ['paid', 'partial', 'pending', 'credit'], default: 'pending' },
     purchaseDate:  { type: Date, default: Date.now },
     notes:         { type: String },
+    billImage:     { type: String },
     performedBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    isDeleted:     { type: Boolean, default: false },
+    deletedAt:     Date,
+    deletedBy:     { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true }
 );

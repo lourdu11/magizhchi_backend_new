@@ -5,51 +5,68 @@ const logger = require('../utils/logger');
  * Single recipient guard + Gmail SMTP dispatcher
  */
 const dispatchEmail = async (mailOptions) => {
-  // Strict single recipient guard
+  const execId = Math.random().toString(36).substring(7).toUpperCase();
+
+  // Basic check before handing over to the Global Gatekeeper in brevoApi.js
   if (!mailOptions.to || typeof mailOptions.to !== 'string') {
-    logger.error('❌ dispatchEmail blocked: recipient missing or invalid');
-    return;
-  }
-  if (mailOptions.to.includes(',') || mailOptions.to.includes(';')) {
-    logger.error(`❌ dispatchEmail BLOCKED — multiple recipients: ${mailOptions.to}`);
+    logger.error(`❌ [${execId}] dispatchEmail BLOCKED: recipient missing or invalid type`);
     return;
   }
 
+  // Ensure no CC/BCC leak at this level
+  delete mailOptions.cc;
+  delete mailOptions.bcc;
+
   try {
-    // Always use Brevo API — no SMTP
     const { sendBrevoApi } = require('../utils/brevoApi');
-    logger.info(`📧 Brevo API dispatch → TO: ${mailOptions.to}`);
-    return await sendBrevoApi(mailOptions);
+    
+    logger.info(`📧 [${execId}] Dispatching via Global Gatekeeper → TO: ${mailOptions.to} | SUBJECT: ${mailOptions.subject}`);
+    
+    const result = await sendBrevoApi(mailOptions);
+    
+    logger.info(`✅ [${execId}] Dispatch Complete [${execId}]`);
+    return result;
   } catch (err) {
-    logger.error(`🔥 Email Dispatch Error: ${err.message}`);
+    logger.error(`🔥 [${execId}] Email Dispatch Error: ${err.message}`);
     throw err;
   }
 };
 
-/**
- * Single source of truth for admin recipient
- * NO fallbacks — if not set, returns null and blocks send
- */
-const getAdminRecipient = async () => {
-  const settings = await Settings.findOne().lean();
-  const alertEmail = settings?.notifications?.email?.alertEmail?.trim().toLowerCase();
+const VALID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-  if (!alertEmail) {
-    logger.error('❌ No Admin Notification Email configured in Settings → Notifications');
+const getAdminRecipient = async () => {
+  // Always fetch fresh from DB — never use a cached value
+  const settings = await Settings.findOne().lean();
+  const rawEmail = settings?.notifications?.email?.alertEmail;
+
+  if (!rawEmail || typeof rawEmail !== 'string' || !rawEmail.trim()) {
+    logger.error('❌ [BLOCK] Admin Notification Email is not configured in Settings.');
     return null;
   }
 
-  logger.info(`✅ Admin recipient resolved → ${alertEmail}`);
-  return alertEmail;
+  // Take only the FIRST token if someone accidentally saved multiple emails
+  const adminEmail = rawEmail.trim().split(/[\s,;]+/)[0].toLowerCase();
+
+  // Strict format validation — must be a proper single email
+  if (!VALID_EMAIL_RE.test(adminEmail)) {
+    logger.error(`❌ [BLOCK] Admin email "${adminEmail}" failed format validation. Fix it in Settings.`);
+    return null;
+  }
+
+  logger.info(`🎯 [AUDIT] Admin recipient locked to: ${adminEmail}`);
+  return adminEmail;
 };
 
 /**
- * Get FROM address — always from environment
- * Force verified Brevo subdomain to prevent blocking
+ * Get FROM address — reads from .env so no hardcoded values
+ * EMAIL_FROM can be: plain email OR "Name <email@domain.com>" format
  */
 const getFromAddress = (storeName) => {
-  const fromEmail = 'lncoderise@11134769.brevosend.com'; 
-  return { from: `${storeName} <${fromEmail}>`, fromEmail };
+  const rawFrom = process.env.EMAIL_FROM || process.env.EMAIL_USER || '';
+  const match = rawFrom.match(/<([^>]+)>/);
+  const fromEmail = match ? match[1].trim() : rawFrom.trim();
+  const displayName = storeName || 'Magizhchi Garments';
+  return { from: `${displayName} <${fromEmail}>`, fromEmail };
 };
 
 /**
@@ -243,9 +260,39 @@ const getEmailSettings = async () => {
   };
 };
 
+/**
+ * Bill Receipt to Customer (Offline/POS)
+ */
+const sendBillReceiptEmail = async (bill) => {
+  try {
+    const settings = await Settings.findOne().lean();
+    const storeName = settings?.store?.name || 'Magizhchi Garments';
+    const sender = getFromAddress(storeName);
+    if (!sender) return;
+
+    const customerEmail = bill.customerDetails?.email;
+    if (!customerEmail) {
+      logger.error('❌ No customer email found for bill receipt');
+      return;
+    }
+
+    const { billReceiptTemplate } = require('../utils/emailTemplates');
+
+    return await dispatchEmail({
+      from: sender.from,
+      to: customerEmail,
+      subject: `Invoice #${bill.billNumber} — ${storeName}`,
+      html: billReceiptTemplate(bill, storeName)
+    });
+  } catch (err) {
+    logger.error(`🔥 Bill Receipt Email Error: ${err.message}`);
+  }
+};
+
 module.exports = {
   sendOTPEmail,
   sendOrderConfirmationEmail,
+  sendBillReceiptEmail,
   sendLowStockEmail,
   sendAdminOrderNotificationEmail,
   sendAdminContactNotificationEmail,

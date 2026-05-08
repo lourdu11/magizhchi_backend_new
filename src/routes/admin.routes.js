@@ -7,6 +7,7 @@ const { protect, isAdmin } = require('../middlewares/auth');
 r.use(protect, isAdmin);
 
 r.get('/dashboard', c.getDashboardStats);
+r.get('/health', c.getServiceHealth);
 r.get('/analytics/sales', c.getSalesAnalytics);
 r.get('/inventory/all-history', require('../controllers/inventory.controller').getAllStockHistory);
 const reportController = require('../controllers/report.controller');
@@ -53,5 +54,6 @@ r.post('/inventory/reconcile', auditController.reconcileStock);
 r.get('/settings', c.getSettings);
 r.put('/settings', c.updateSettings);
 r.post('/test-notifications-v2', c.testNotifications);
+r.post('/reset-system-data', c.resetSystemData);
 
 module.exports = r;

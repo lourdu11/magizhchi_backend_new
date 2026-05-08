@@ -8,7 +8,7 @@ const StockMovement = require('../models/StockMovement');
 const Settings = require('../models/Settings');
 const { razorpay, isConfigured: isRazorpayConfigured } = require('../config/razorpay');
 const { sendOrderConfirmationEmail } = require('../services/email.service');
-const { sendOrderNotificationToAdmin, sendOrderCancellationNotificationToAdmin } = require('../services/whatsapp.service');
+const { sendOrderNotificationToAdmin, sendOrderCancellationNotificationToAdmin, sendOrderReceiptToCustomer } = require('../services/whatsapp.service');
 const ApiResponse = require('../utils/apiResponse');
 const crypto = require('crypto');
 const logger = require('../utils/logger');
@@ -329,7 +329,48 @@ exports.updateOrderStatus = async (req, res, next) => {
     }
 
     await order.save();
+    
+    // ─── CUSTOMER WHATSAPP NOTIFICATION ───
+    if (status === 'delivered') {
+      sendOrderReceiptToCustomer(order.shippingAddress.phone, order, 'online').catch(e => logger.error('Order Receipt WhatsApp Error:', e));
+    }
+
     return ApiResponse.success(res, { order }, 'Order status updated');
+  } catch (error) { next(error); }
+};
+
+// POST /orders/:id/resend-receipt (Admin)
+exports.resendReceipt = async (req, res, next) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return ApiResponse.notFound(res, 'Order not found');
+
+    const results = { whatsapp: false, email: false };
+
+    // 1. WhatsApp
+    const phone = order.shippingAddress?.phone || order.userId?.phone;
+    if (phone) {
+      try {
+        await sendOrderReceiptToCustomer(phone, order, 'online');
+        results.whatsapp = true;
+      } catch (err) { logger.error('Resend Order WhatsApp Error:', err); }
+    }
+
+    // 2. Email
+    const email = order.guestDetails?.email || order.userId?.email || order.shippingAddress?.email;
+    if (email) {
+      try {
+        const { sendOrderConfirmationEmail } = require('../services/email.service');
+        await sendOrderConfirmationEmail(order);
+        results.email = true;
+      } catch (err) { logger.error('Resend Order Email Error:', err); }
+    }
+
+    if (!results.whatsapp && !results.email) {
+      return ApiResponse.error(res, 'No contact details found or delivery failed', 400);
+    }
+
+    return ApiResponse.success(res, results, 'Receipt resent successfully');
   } catch (error) { next(error); }
 };
 

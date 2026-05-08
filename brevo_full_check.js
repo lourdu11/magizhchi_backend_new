@@ -30,14 +30,14 @@ const run = async () => {
     console.log(`  ${s.email} - active: ${s.active}`);
   });
 
-  // 3. Send direct test to lourdufreefire@gmail.com
+  // 3. Send direct test to admin@magizhchi.in
   console.log('\n=== SENDING TEST EMAIL ===');
   const sendRes = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
     body: JSON.stringify({
       sender: { name: 'Magizhchi Garments', email: account.email },
-      to: [{ email: 'lourdufreefire@gmail.com' }],
+      to: [{ email: 'admin@magizhchi.in' }],
       subject: 'LIVE TEST ' + new Date().toISOString(),
       htmlContent: '<h1>Live Test</h1><p>If you see this, email is working!</p>'
     })

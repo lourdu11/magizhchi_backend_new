@@ -15,7 +15,7 @@ exports.getDailyProfitReport = async (req, res, next) => {
 
     // 1. Fetch Bills and Orders
     const [bills, orders] = await Promise.all([
-      Bill.find(query).lean(),
+      Bill.find({ ...query, isDeleted: { $ne: true } }).lean(),
       Order.find({ ...query, paymentStatus: 'completed' }).lean()
     ]);
 

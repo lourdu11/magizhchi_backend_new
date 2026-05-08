@@ -93,6 +93,21 @@ exports.login = async (req, res, next) => {
     // Reset login attempts on success
     await User.findByIdAndUpdate(user._id, { $set: { loginAttempts: 0 }, $unset: { lockUntil: 1 } });
 
+    // ── Admin/Staff 2FA Challenge ───────────────────────────────
+    if (user.role === 'admin' || user.role === 'staff') {
+      logger.info(`🛡️ 2FA Challenge initiated for ${user.role}: ${identifier}`);
+      
+      const result = await sendOTP(identifier, 'admin_2fa');
+      
+      return ApiResponse.success(res, {
+        status: 'OTP_REQUIRED',
+        method: result.method,
+        identifier: isEmail(identifier)
+          ? identifier.replace(/(.{2}).+(@.+)/, '$1***$2')
+          : identifier.replace(/(\d{2})\d+(\d{2})/, '$1*****$2'),
+      }, `Login secure: Enter the code sent to your ${result.method === 'whatsapp' ? 'WhatsApp' : 'email'}.`);
+    }
+
     const { accessToken, refreshToken } = generateTokens(user._id);
     await User.findByIdAndUpdate(user._id, { refreshToken });
     setCookies(res, accessToken, refreshToken);
@@ -104,6 +119,38 @@ exports.login = async (req, res, next) => {
       user: { _id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, isNewUser },
       accessToken,
     }, message);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ─── POST /auth/verify-admin-2fa ──────────────────────────────
+exports.verifyAdmin2FA = async (req, res, next) => {
+  try {
+    const { identifier, otp } = req.body;
+    if (!identifier || !otp) {
+      return ApiResponse.error(res, 'Identity and security code are required', 400);
+    }
+
+    // 1. Verify OTP
+    await verifyOTP(identifier, otp, 'admin_2fa', true);
+
+    // 2. Fetch User
+    const query = buildQuery(identifier);
+    const user = await User.findOne(query);
+    if (!user) return ApiResponse.notFound(res, 'Administrator record not found');
+
+    // 3. Issue Tokens
+    const { accessToken, refreshToken } = generateTokens(user._id);
+    await User.findByIdAndUpdate(user._id, { refreshToken });
+    setCookies(res, accessToken, refreshToken);
+
+    logger.info(`🔐 2FA SUCCESS: ${user.role} logged in: ${identifier}`);
+
+    return ApiResponse.success(res, {
+      user: { _id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role },
+      accessToken,
+    }, 'Access Authorized. Welcome back.');
   } catch (error) {
     next(error);
   }

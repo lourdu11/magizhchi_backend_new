@@ -111,6 +111,7 @@ exports.getProducts = async (req, res, next) => {
           ...(isFeatured === 'true' ? { 'productDetails.isFeatured': true } : {}),
           ...(isBestSeller === 'true' ? { 'productDetails.isBestSeller': true } : {}),
           ...(isNewArrival === 'true' ? { 'productDetails.isNewArrival': true } : {}),
+          ...(isPOS === 'true' ? { availableStock: { $gt: 0 } } : {}),
           
           // Advanced Search (High Level)
           ...(search ? {
@@ -187,7 +188,11 @@ exports.getAdminProducts = async (req, res, next) => {
     // ─── INJECT AGGREGATED INVENTORY ───
     const productIds = products.map(p => p._id);
     const Inventory = require('../models/Inventory');
-    const allInventory = await Inventory.find({ productRef: { $in: productIds } }).lean({ virtuals: true });
+    // Only count ACTIVE (non-archived) inventory variants
+    const allInventory = await Inventory.find({ 
+      productRef: { $in: productIds },
+      isDeleted: { $ne: true }
+    }).lean({ virtuals: true });
 
     const inventoryMap = allInventory.reduce((acc, item) => {
       const pId = item.productRef.toString();
@@ -201,23 +206,27 @@ exports.getAdminProducts = async (req, res, next) => {
       return acc;
     }, {});
 
-    const processedProducts = products.map(p => {
-      const inv = inventoryMap[p._id.toString()] || { totalStock: 0, sizes: new Set(), colors: new Set(), variantCount: 0 };
-      return {
-        ...p.toObject(),
-        inventorySummary: {
-          totalStock: inv.totalStock,
-          sizes: Array.from(inv.sizes),
-          colors: Array.from(inv.colors),
-          variantCount: inv.variantCount
-        }
-      };
-    });
+    const processedProducts = products
+      .map(p => {
+        const inv = inventoryMap[p._id.toString()] || { totalStock: 0, sizes: new Set(), colors: new Set(), variantCount: 0 };
+        return {
+          ...p,
+          inventorySummary: {
+            totalStock: inv.totalStock,
+            sizes: Array.from(inv.sizes),
+            colors: Array.from(inv.colors),
+            variantCount: inv.variantCount
+          }
+        };
+      })
+      // KEY FIX: Exclude products with no active inventory variants from admin catalog
+      .filter(p => p.inventorySummary.variantCount > 0);
 
     return ApiResponse.paginated(res, processedProducts, {
       page: Number(page), limit: Number(limit), total,
       pages: Math.ceil(total / Number(limit))
     });
+
   } catch (error) { next(error); }
 };
 

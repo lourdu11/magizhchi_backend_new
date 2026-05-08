@@ -3,6 +3,16 @@ const ApiResponse = require('../utils/apiResponse');
 const { sendContactMessageNotificationToAdmin } = require('../services/whatsapp.service');
 const Settings = require('../models/Settings');
 const Order = require('../models/Order');
+const User = require('../models/User');
+
+exports.getStaffList = async (req, res, next) => {
+  try {
+    const staff = await User.find({ role: 'staff' }).select('name _id').sort({ name: 1 }).lean();
+    return ApiResponse.success(res, staff);
+  } catch (e) {
+    next(e);
+  }
+};
 
 exports.submitContactForm = async (req, res, next) => {
   try {

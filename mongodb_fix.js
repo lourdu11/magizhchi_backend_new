@@ -18,7 +18,7 @@ async function cleanup() {
     // Set correct alertEmail and verified sender
     const update = { 
       $set: { 
-        "notifications.email.alertEmail": "xavierbritto16@gmail.com", // Adjust this if deploy1email1 was intended
+        "notifications.email.alertEmail": "admin@magizhchi.in",
         "notifications.email.user": "lncoderise@gmail.com" 
       } 
     };

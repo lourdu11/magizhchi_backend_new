@@ -21,6 +21,7 @@ const errorHandler = (err, req, res, next) => {
   if (err.name === 'ValidationError') {
     statusCode = 422;
     message = Object.values(err.errors).map((e) => e.message).join('. ');
+    logger.warn(`🔍 Validation Error [422]: ${message}`);
   }
 
   // JWT Errors

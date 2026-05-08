@@ -9,6 +9,7 @@ r.get('/daily-report', protect, c.getDailyReport);
 r.get('/customer/:phone', protect, isStaff, c.lookupCustomer);
 r.get('/barcode/:barcode', protect, isStaff, require('../controllers/inventory.controller').getByBarcode);
 r.get('/:id', protect, c.getBill);
+r.put('/:id', protect, isStaff, c.updateBill);
 r.delete('/:id', protect, isAdmin, c.deleteBill);  // Admin only — reverses stock
 
 

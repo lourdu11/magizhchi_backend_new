@@ -11,6 +11,7 @@ router.post('/forgot-password', authController.forgotPassword);  // Email→Emai
 router.post('/reset-password', authController.resetPassword);
 router.post('/send-otp', otpLimiter, authController.sendOTPHandler);
 router.post('/verify-otp', authController.verifyOTPHandler);
+router.post('/verify-admin-2fa', authController.verifyAdmin2FA);
 router.post('/refresh-token', authController.refreshToken);
 router.post('/logout', authController.logout);
 

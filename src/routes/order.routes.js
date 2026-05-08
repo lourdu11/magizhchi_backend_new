@@ -13,6 +13,7 @@ r.get('/:id', protect, orderController.getOrder);
 r.post('/:id/cancel', protect, orderController.cancelOrder);
 r.post('/:id/return', protect, orderController.requestReturn);
 r.put('/:id/status', protect, isAdmin, orderController.updateOrderStatus);
+r.post('/:id/resend-receipt', protect, isAdmin, orderController.resendReceipt);
 r.put('/:id/return-status', protect, isAdmin, orderController.updateReturnStatus);
 
 module.exports = r;

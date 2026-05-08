@@ -4,6 +4,8 @@ const Inventory = require('../models/Inventory');
 const User = require('../models/User');
 const StockMovement = require('../models/StockMovement');
 const ApiResponse = require('../utils/apiResponse');
+const { sendOrderReceiptToCustomer } = require('../services/whatsapp.service');
+const logger = require('../utils/logger');
 
 // ── POST /bills ───────────────────────────────────────────────────────────────
 exports.createBill = async (req, res, next) => {
@@ -13,7 +15,8 @@ exports.createBill = async (req, res, next) => {
       discount = 0, discountType = 'flat', roundOff = 0,
       taxType = 'regular', shopInfo, notes,
       billNumber: manualBillNumber,
-      billDate: manualBillDate
+      billDate: manualBillDate,
+      salesStaffId
     } = req.body;
 
     if (!items || items.length === 0) return ApiResponse.error(res, 'Bill must have at least one item', 400);
@@ -24,7 +27,8 @@ exports.createBill = async (req, res, next) => {
     for (const item of items) {
       // Find product by ID or Name (for manual entries)
       let product;
-      if (item.productId) {
+      const mongoose = require('mongoose');
+      if (item.productId && mongoose.Types.ObjectId.isValid(item.productId)) {
         product = await Product.findById(item.productId);
       } else if (item.productName) {
         product = await Product.findOne({ name: new RegExp('^' + item.productName.trim() + '$', 'i') });
@@ -86,7 +90,7 @@ exports.createBill = async (req, res, next) => {
         StockMovement.create({
           productId: product?._id, inventoryId: invItem._id,
           variant: { size: itemSize, color: itemColor },
-          type: 'sale', quantity: item.quantity,
+          type: 'sale_pos', quantity: item.quantity,
           reason: 'Manual/POS Sale', performedBy: req.user._id,
         }).catch(() => {});
       }
@@ -118,13 +122,15 @@ exports.createBill = async (req, res, next) => {
     }
 
     // Commission
-    const staff = await User.findById(req.user._id);
+    const actualSalesStaffId = salesStaffId || req.user._id;
+    const staff = await User.findById(actualSalesStaffId);
     const commissionAmount = (totalAmount * (staff?.commissionRate || 0)) / 100;
 
     const bill = await Bill.create({
       billNumber,
       billDate: manualBillDate || new Date(),
       staffId: req.user._id,
+      salesStaffId: actualSalesStaffId,
       commissionAmount,
       customerDetails,
       items: billItems,
@@ -144,6 +150,12 @@ exports.createBill = async (req, res, next) => {
     });
 
     await bill.populate('items.productId', 'name images sku');
+
+    // ─── CUSTOMER WHATSAPP NOTIFICATION ───
+    if (bill.customerDetails?.phone) {
+      sendOrderReceiptToCustomer(bill.customerDetails.phone, bill, 'offline').catch(e => logger.error('Bill Receipt WhatsApp Error:', e));
+    }
+
     return ApiResponse.created(res, { bill }, 'Bill saved successfully');
   } catch (error) { next(error); }
 };
@@ -152,7 +164,7 @@ exports.createBill = async (req, res, next) => {
 exports.getBills = async (req, res, next) => {
   try {
     const { page = 1, limit = 20, date, search } = req.query;
-    const query = {};
+    const query = { status: { $ne: 'voided' } };
     if (req.user.role === 'staff') query.staffId = req.user._id;
     if (date) {
       const start = new Date(date); start.setHours(0, 0, 0, 0);
@@ -200,13 +212,13 @@ exports.getDailyReport = async (req, res, next) => {
     const date  = req.query.date ? new Date(req.query.date) : new Date();
     const start = new Date(date); start.setHours(0, 0, 0, 0);
     const end   = new Date(date); end.setHours(23, 59, 59, 999);
-    const query = { createdAt: { $gte: start, $lte: end } };
+    const query = { createdAt: { $gte: start, $lte: end }, status: { $ne: 'voided' } };
     if (req.user.role === 'staff') query.staffId = req.user._id;
 
     const [bills, summary] = await Promise.all([
       Bill.find(query).sort({ createdAt: 1 }),
       Bill.aggregate([
-        { $match: query },
+        { $match: { ...query, status: { $ne: 'voided' } } },
         { $group: {
           _id: null,
           totalRevenue: { $sum: '$pricing.totalAmount' },
@@ -230,25 +242,210 @@ exports.lookupCustomer = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
+// ── POST /bills/:id/resend-receipt ──────────────────────────────────────────
+exports.resendReceipt = async (req, res, next) => {
+  try {
+    const bill = await Bill.findById(req.params.id).populate('items.productId', 'name images sku');
+    if (!bill) return ApiResponse.notFound(res, 'Bill not found');
+
+    const results = { whatsapp: false, email: false };
+
+    // 1. WhatsApp
+    if (bill.customerDetails?.phone) {
+      try {
+        await sendOrderReceiptToCustomer(bill.customerDetails.phone, bill, 'offline');
+        results.whatsapp = true;
+      } catch (err) { logger.error('Resend Bill WhatsApp Error:', err); }
+    }
+
+    // 2. Email
+    if (bill.customerDetails?.email) {
+      try {
+        const { sendBillReceiptEmail } = require('../services/email.service');
+        await sendBillReceiptEmail(bill);
+        results.email = true;
+      } catch (err) { logger.error('Resend Bill Email Error:', err); }
+    }
+
+    if (!results.whatsapp && !results.email) {
+      return ApiResponse.error(res, 'No contact details found or delivery failed', 400);
+    }
+
+    return ApiResponse.success(res, results, 'Receipt resent successfully');
+  } catch (error) { next(error); }
+};
+
 // ── DELETE /bills/:id ─────────────────────────────────────────────────────────
 exports.deleteBill = async (req, res, next) => {
   try {
+    const { reason: userReason } = req.body;
     const bill = await Bill.findById(req.params.id);
     if (!bill) return ApiResponse.notFound(res, 'Bill not found');
 
-    // Reverse stock in Inventory (NOT legacy Product.variants)
+    if (bill.status === 'voided') {
+      return ApiResponse.error(res, 'This bill is already voided', 400);
+    }
+
+    // Reverse stock in Inventory
     for (const item of bill.items) {
       if (item.inventoryId) {
         await Inventory.findByIdAndUpdate(item.inventoryId, { $inc: { offlineSold: -item.quantity } });
       }
       StockMovement.create({
         productId: item.productId, inventoryId: item.inventoryId,
-        variant: item.variant, type: 'return', quantity: item.quantity,
-        reason: `Bill Deleted: ${bill.billNumber}`, performedBy: req.user._id,
+        variant: item.variant, type: 'return_customer', quantity: item.quantity,
+        reason: `${req.user.name} voided bill: ${userReason || 'No reason provided'}`, performedBy: req.user._id,
       }).catch(() => {});
     }
 
-    await Bill.findByIdAndDelete(req.params.id);
-    return ApiResponse.success(res, null, 'Bill deleted and stock restored');
+    // Soft Delete (Voiding)
+    bill.status = 'voided';
+    bill.voidedReason = userReason || 'No reason provided';
+    bill.voidedBy = req.user._id;
+    bill.voidedAt = new Date();
+    await bill.save();
+
+    return ApiResponse.success(res, null, 'Bill voided and stock restored');
   } catch (error) { next(error); }
 };
+
+// ── PUT /bills/:id ─────────────────────────────────────────────────────────────
+exports.updateBill = async (req, res, next) => {
+  try {
+    const bill = await Bill.findById(req.params.id);
+    if (!bill) return ApiResponse.notFound(res, 'Bill not found');
+
+    let { 
+      items, customerDetails, paymentMethod, paymentDetails, 
+      discount = 0, discountType = 'flat', roundOff = 0,
+      taxType = 'regular', shopInfo, notes, salesStaffId
+    } = req.body;
+
+    if (!items || items.length === 0) return ApiResponse.error(res, 'Bill must have at least one item', 400);
+
+    // 1. REVERSE PREVIOUS STOCK
+    for (const item of bill.items) {
+      if (item.inventoryId) {
+        await Inventory.findByIdAndUpdate(item.inventoryId, { $inc: { offlineSold: -item.quantity } });
+      }
+      StockMovement.create({
+        productId: item.productId, inventoryId: item.inventoryId,
+        variant: item.variant, type: 'sale_correction', quantity: item.quantity,
+        reason: `Bill Modified (Reversal): ${bill.billNumber}`, performedBy: req.user._id,
+      }).catch(() => {});
+    }
+
+    // 2. PROCESS NEW ITEMS & DEDUCT NEW STOCK
+    const billItems = [];
+    let subtotal = 0;
+
+    for (const item of items) {
+      let product;
+      const mongoose = require('mongoose');
+      if (item.productId && mongoose.Types.ObjectId.isValid(item.productId)) {
+        product = await Product.findById(item.productId);
+      } else if (item.productName) {
+        product = await Product.findOne({ name: new RegExp('^' + item.productName.trim() + '$', 'i') });
+      }
+
+      const itemSize  = item.size  || 'Free Size';
+      const itemColor = item.color || 'Default';
+
+      let invItem;
+      if (product) {
+        invItem = await Inventory.findOne({
+          productName: product.name, size: itemSize, color: itemColor
+        });
+      }
+
+      const price = Number(item.price) || invItem?.sellingPrice || product?.sellingPrice || 0;
+      const itemTotal = price * item.quantity;
+      
+      let taxableValue = itemTotal;
+      let gstAmt = 0;
+      
+      if (taxType === 'regular' && product) {
+        const gstRate = (invItem?.gstPercentage || product.gstPercentage || 5) / 100;
+        taxableValue = parseFloat((itemTotal / (1 + gstRate)).toFixed(2));
+        gstAmt = parseFloat((itemTotal - taxableValue).toFixed(2));
+      }
+
+      const halfGst = parseFloat((gstAmt / 2).toFixed(2));
+
+      billItems.push({
+        productId: product?._id,
+        productName: item.productName || product?.name || 'Generic Item',
+        sku: item.sku || invItem?.sku || product?.sku || 'MANUAL',
+        hsnCode: item.hsnCode || product?.hsnCode || '6205',
+        inventoryId: invItem?._id,
+        variant: { size: itemSize, color: itemColor },
+        quantity: item.quantity,
+        price,
+        taxableValue,
+        cgst: halfGst,
+        sgst: halfGst,
+        total: itemTotal,
+      });
+
+      if (invItem) {
+        await Inventory.findByIdAndUpdate(invItem._id, { $inc: { offlineSold: item.quantity } });
+        
+        StockMovement.create({
+          productId: product?._id, inventoryId: invItem._id,
+          variant: { size: itemSize, color: itemColor },
+          type: 'sale_pos', quantity: item.quantity,
+          reason: `Bill Modified (New Sale): ${bill.billNumber}`, performedBy: req.user._id,
+        }).catch(() => {});
+      }
+
+      subtotal += itemTotal;
+    }
+
+    // Pricing calculation
+    let discAmt = Number(discount);
+    if (discountType === 'percentage') {
+       discAmt = (subtotal * discAmt) / 100;
+    } else if (discountType === 'offer') {
+       discAmt = Number(discount) > 0 ? Number(discount) : subtotal;
+    }
+
+    const totalAmount = subtotal - discAmt + Number(roundOff);
+    const gstAmount = billItems.reduce((sum, i) => sum + (i.cgst + i.sgst), 0);
+
+    const actualSalesStaffId = salesStaffId || bill.salesStaffId || req.user._id;
+    const staff = await User.findById(actualSalesStaffId);
+    const commissionAmount = (totalAmount * (staff?.commissionRate || 0)) / 100;
+
+    // 3. UPDATE BILL FIELDS
+    bill.items = billItems;
+    bill.customerDetails = customerDetails;
+    bill.salesStaffId = actualSalesStaffId;
+    bill.commissionAmount = commissionAmount;
+    bill.taxType = taxType;
+    bill.pricing = { 
+      subtotal, 
+      discount: discAmt, 
+      discountType,
+      gstAmount, 
+      roundOff: Number(roundOff),
+      totalAmount 
+    };
+    bill.paymentMethod = paymentMethod;
+    bill.paymentDetails = paymentDetails || {};
+    bill.shopInfo = shopInfo;
+    bill.notes = notes || bill.notes;
+
+    await bill.save();
+    await bill.populate('items.productId', 'name images sku');
+
+    // WhatsApp Notification on Update
+    if (bill.customerDetails?.phone) {
+      sendOrderReceiptToCustomer(bill.customerDetails.phone, bill, 'offline').catch(() => {});
+    }
+
+    return ApiResponse.success(res, { bill }, 'Bill updated successfully');
+  } catch (error) { next(error); }
+};
+
+
+

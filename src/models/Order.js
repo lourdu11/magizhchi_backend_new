@@ -8,7 +8,7 @@ const orderItemSchema = new mongoose.Schema({
   hsnCode: { type: String, default: '6205' },
   variant: {
     size: { type: String, required: true },
-    color: { type: String, required: true },
+    color: { type: String },
   },
   quantity: { type: Number, required: true, min: 1 },
   price: { type: Number, required: true },

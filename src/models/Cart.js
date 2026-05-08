@@ -4,7 +4,7 @@ const cartItemSchema = new mongoose.Schema({
   productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
   variant: {
     size: { type: String, required: true },
-    color: { type: String, required: true },
+    color: { type: String },
   },
   quantity: { type: Number, required: true, min: 1, max: 10 },
   addedAt: { type: Date, default: Date.now },

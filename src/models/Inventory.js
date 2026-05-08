@@ -6,7 +6,7 @@ const inventorySchema = new mongoose.Schema(
     // ── Product Identity ───────────────────────────────────
     productName: { type: String, required: true, trim: true },
     category:    { type: String, trim: true, default: 'Uncategorized' },
-    color:       { type: String, required: true, trim: true },
+    color:       { type: String, trim: true, default: '' },
     size:        { type: String, required: true, trim: true },
     sku:         { type: String, trim: true, uppercase: true },
     barcode:     { type: String, trim: true },
@@ -47,6 +47,10 @@ const inventorySchema = new mongoose.Schema(
 
     // ── Media Assets (Pulled from Procurement) ────────────────
     images: [{ type: String }],
+
+    // ── Archival / Soft-Delete ──────────────────────────────
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date }
   },
   {
     timestamps: true,

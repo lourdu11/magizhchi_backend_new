@@ -5,6 +5,9 @@ const c = require('../controllers/public.controller');
 // Publicly accessible store settings
 r.get('/settings', c.getPublicSettings);
 
+// Publicly accessible staff list for POS
+r.get('/staff-list', c.getStaffList);
+
 // Order tracking for guests (Order ID + Phone)
 r.post('/track-order', c.trackOrder);
 

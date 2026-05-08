@@ -1,9 +1,10 @@
 const { 
     default: makeWASocket, 
-    useMultiFileAuthState, 
     DisconnectReason, 
     fetchLatestBaileysVersion, 
-    makeCacheableSignalKeyStore 
+    makeCacheableSignalKeyStore,
+    initAuthCreds,
+    BufferJSON
 } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const path = require('path');
@@ -20,40 +21,90 @@ let lastInitTime = 0;
 let currentQR = null;
 let reconnectTimeout = null;
 
-const LOCK_FILE = path.resolve(__dirname, '../../.whatsapp.lock');
+/**
+ * ARCHITECTURE: PURE MONGODB AUTH (NO LOCAL DISK DEPENDENCY)
+ * 1. Uses Baileys to connect directly to WhatsApp via WebSockets.
+ * 2. Auth state (creds + keys) is stored directly in MongoDB.
+ * 3. Works perfectly on Render/Heroku/Cloud without losing session.
+ */
 
-const checkLock = () => {
-    if (fs.existsSync(LOCK_FILE)) {
+const useMongoDBAuthState = async (sessionKey = 'baileys-auth') => {
+    const writeData = async (data, key) => {
         try {
-            const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8'));
-            if (pid && pid !== process.pid) {
-                try {
-                    process.kill(pid, 0); // Check if process exists
-                    return pid;
-                } catch (e) {
-                    // Process not running, stale lock
-                    return null;
-                }
-            }
-        } catch (e) {
+            const str = JSON.stringify(data, BufferJSON.replacer);
+            await WhatsAppSession.findOneAndUpdate(
+                { key: `${sessionKey}-${key}` },
+                { data: str },
+                { upsert: true }
+            );
+        } catch (err) {
+            logger.error(`❌ WhatsApp: Failed to write ${key} to DB:`, err.message);
+        }
+    };
+
+    const readData = async (key) => {
+        try {
+            const res = await WhatsAppSession.findOne({ key: `${sessionKey}-${key}` });
+            return res ? JSON.parse(res.data, BufferJSON.reviver) : null;
+        } catch (err) {
+            logger.error(`❌ WhatsApp: Failed to read ${key} from DB:`, err.message);
             return null;
         }
-    }
-    return null;
-};
+    };
 
-const createLock = () => {
-    fs.writeFileSync(LOCK_FILE, process.pid.toString(), 'utf8');
-};
-
-const removeLock = () => {
-    if (fs.existsSync(LOCK_FILE)) {
+    const removeData = async (key) => {
         try {
-            const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8'));
-            if (pid === process.pid) {
-                fs.unlinkSync(LOCK_FILE);
+            await WhatsAppSession.deleteOne({ key: `${sessionKey}-${key}` });
+        } catch (err) {
+            logger.error(`❌ WhatsApp: Failed to delete ${key} from DB:`, err.message);
+        }
+    };
+
+    // Load initial creds
+    const creds = await readData('creds') || initAuthCreds();
+
+    return {
+        state: {
+            creds,
+            keys: {
+                get: async (type, ids) => {
+                    const data = {};
+                    await Promise.all(
+                        ids.map(async (id) => {
+                            let value = await readData(`${type}-${id}`);
+                            if (type === 'app-state-sync-key' && value) {
+                                value = value; // Already handled by BufferJSON
+                            }
+                            data[id] = value;
+                        })
+                    );
+                    return data;
+                },
+                set: async (data) => {
+                    const tasks = [];
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const value = data[category][id];
+                            const key = `${category}-${id}`;
+                            tasks.push(value ? writeData(value, key) : removeData(key));
+                        }
+                    }
+                    await Promise.all(tasks);
+                }
             }
-        } catch (e) {}
+        },
+        saveCreds: async () => {
+            await writeData(creds, 'creds');
+        }
+    };
+};
+
+const clearSessionFromDb = async (sessionKey = 'baileys-auth') => {
+    try {
+        await WhatsAppSession.deleteMany({ key: { $regex: new RegExp(`^${sessionKey}-`) } });
+        logger.info('🗑️ WhatsApp: Remote session cleared from MongoDB');
+    } catch (err) {
+        logger.error('❌ WhatsApp: Failed to clear session from DB:', err.message);
     }
 };
 
@@ -86,82 +137,36 @@ const closeWhatsApp = async () => {
             isReady = false;
         } catch (e) {}
     }
-    removeLock();
+    // Remote auth doesn't use local locks
 };
 
-const saveSessionToDb = async () => {
-    try {
-        const sessionPath = path.resolve(__dirname, '../../.whatsapp-session/baileys-auth');
-        if (!fs.existsSync(sessionPath)) return;
-
-        const files = fs.readdirSync(sessionPath);
-        const sessionData = {};
-
-        for (const file of files) {
-            if (file.endsWith('.json')) {
-                const content = fs.readFileSync(path.join(sessionPath, file), 'utf8');
-                sessionData[file] = content;
-            }
-        }
-
-        await WhatsAppSession.findOneAndUpdate(
-            { key: 'baileys-auth' },
-            { data: JSON.stringify(sessionData) },
-            { upsert: true, returnDocument: 'after' }
-        );
-        logger.debug('💾 WhatsApp: Session synced to MongoDB');
-    } catch (err) {
-        logger.error('❌ WhatsApp: Failed to sync session to MongoDB:', err.message);
-    }
-};
-
-const restoreSessionFromDb = async () => {
-    try {
-        const sessionPath = path.resolve(__dirname, '../../.whatsapp-session/baileys-auth');
-        if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
-
-        const session = await WhatsAppSession.findOne({ key: 'baileys-auth' });
-        if (!session) {
-            logger.info('📱 WhatsApp: No existing session found in MongoDB');
-            return false;
-        }
-
-        const sessionData = JSON.parse(session.data);
-        for (const [file, content] of Object.entries(sessionData)) {
-            fs.writeFileSync(path.join(sessionPath, file), content, 'utf8');
-        }
-        logger.info('✅ WhatsApp: Session restored from MongoDB');
-        return true;
-    } catch (err) {
-        logger.error('❌ WhatsApp: Failed to restore session from MongoDB:', err.message);
-        return false;
-    }
-};
 
 const initWhatsApp = async () => {
     const now = Date.now();
     
-    // 1. Singleton Lock Check
-    const existingPid = checkLock();
-    if (existingPid) {
-        logger.warn(`📱 WhatsApp: Instance already running (PID ${existingPid})`);
-        return;
-    }
-
-    // 2. Cooldown check
+    // 1. Singleton Check (Basic cooldown/lock)
     if (isInitializing || (now - lastInitTime < 10000)) return;
     
     isInitializing = true;
     lastInitTime = now;
-    createLock();
 
-    // 3. Restore from MongoDB before starting
-    await restoreSessionFromDb();
+    // ─── ZOMBIE SOCKET KILLER ───
+    // Before starting a new connection, ensure any old socket is dead.
+    // This prevents "Conflict (440)" errors where two sockets fight for the same session.
+    if (sock) {
+        try {
+            logger.info('📱 WhatsApp: Cleaning up previous socket instance...');
+            sock.ev.removeAllListeners();
+            sock.end();
+            sock = null;
+        } catch (e) {
+            logger.warn('⚠️ WhatsApp: Cleanup of old socket failed (ignorable):', e.message);
+        }
+    }
 
-    const sessionPath = path.resolve(__dirname, '../../.whatsapp-session/baileys-auth');
-    if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
+    logger.info('📱 WhatsApp: Initializing with MongoDB Auth...');
 
-    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+    const { state, saveCreds } = await useMongoDBAuthState();
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
@@ -172,12 +177,11 @@ const initWhatsApp = async () => {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Magizhchi ERP', 'Chrome', '110.0.0'],
+        browser: [`Magizhchi ERP ${Math.random().toString(36).substring(7)}`, 'Chrome', '110.0.0'],
     });
 
     sock.ev.on('creds.update', async () => {
         await saveCreds();
-        await saveSessionToDb(); // Sync to MongoDB whenever creds change
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -194,58 +198,67 @@ const initWhatsApp = async () => {
             const errorMsg = lastDisconnect?.error?.message || '';
             const isBadSession = errorCode === 401 || errorMsg.includes('Bad MAC') || errorMsg.includes('encryption');
             
+            logger.info(`📱 WhatsApp: Connection closed (Code: ${errorCode}, Msg: ${errorMsg})`);
+            
             const shouldReconnect = errorCode !== DisconnectReason.loggedOut && !isBadSession;
             
             isReady = false;
             isInitializing = false;
             
             if (isBadSession) {
-                logger.error('🚨 WhatsApp: Corrupt session detected (Bad MAC). Clearing session for safety...');
-                await WhatsAppSession.deleteOne({ key: 'baileys-auth' }).catch(() => {});
-                if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
+                logger.error('🚨 WhatsApp: Corrupt session detected. Clearing from MongoDB...');
+                await clearSessionFromDb();
                 setTimeout(() => initWhatsApp(), 5000);
             } else if (shouldReconnect) {
+                logger.info('🔄 WhatsApp: Attempting to reconnect in 10s...');
                 setTimeout(() => initWhatsApp(), 10000);
             } else {
-                // Logged out: Clear everything
-                WhatsAppSession.deleteOne({ key: 'baileys-auth' }).catch(() => {});
-                if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
+                logger.warn('🚫 WhatsApp: Logged out or terminal error. Not reconnecting.');
+                await clearSessionFromDb();
             }
         } else if (connection === 'open') {
             isReady = true;
             isInitializing = false;
-            logger.info('✅ WhatsApp Connected');
-            saveSessionToDb(); // Initial sync on success
+            logger.info('✅ WhatsApp Connected (Cloud Session Active)');
         }
     });
 
     return sock;
 };
 
-const sendMessage = async (phone, message, retries = 3) => {
+const sendMessage = async (phone, message, options = {}, retries = 3) => {
     const cleanPhone = phone.replace(/\D/g, '');
     const withCountry = cleanPhone.startsWith('91') ? cleanPhone : `91${cleanPhone}`;
     const jid = `${withCountry}@s.whatsapp.net`;
+    const { image } = options;
 
     for (let i = 0; i < retries; i++) {
         try {
             if (!isReady || !sock) {
-                await initWhatsApp();
-                // Wait for connection to be ready (short poll)
-                for (let j = 0; j < 10; j++) {
+                // If already initializing, don't trigger again, just wait
+                if (!isInitializing) await initWhatsApp();
+                
+                // Wait for connection to be ready (increased poll: 30s)
+                logger.info(`⏳ WhatsApp: Waiting for connection (Attempt ${i + 1})...`);
+                for (let j = 0; j < 30; j++) {
                     if (isReady) break;
                     await new Promise(r => setTimeout(r, 1000));
                 }
-                if (!isReady) throw new Error('WhatsApp socket not ready');
+                if (!isReady) throw new Error('WhatsApp socket not ready after 30s');
             }
 
-            await sock.sendMessage(jid, { text: message });
-            logger.info(`✅ WhatsApp message sent to +${withCountry}`);
+            if (image) {
+                await sock.sendMessage(jid, { image: { url: image }, caption: message });
+            } else {
+                await sock.sendMessage(jid, { text: message });
+            }
+            
+            logger.info(`✅ WhatsApp message ${image ? 'with image ' : ''}sent to +${withCountry}`);
             return true;
         } catch (err) {
             logger.warn(`⚠️ WhatsApp Send Attempt ${i + 1} failed: ${err.message}`);
             if (i === retries - 1) throw err;
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise(r => setTimeout(r, 3000)); // Increase wait between retries
         }
     }
 };
@@ -364,15 +377,58 @@ const sendWhatsAppNotification = async (phone, message) => {
     return await sendMessage(phone, msg);
 };
 
-process.on('exit', removeLock);
-process.on('SIGINT', removeLock);
-process.on('SIGTERM', removeLock);
+const sendOrderReceiptToCustomer = async (phone, order, type = 'online') => {
+    const { storeName } = await getAdminSettings();
+    const isOnline = type === 'online';
+    const orderNo = isOnline ? order.orderNumber : order.billNumber;
+    const items = order.items.map(item => 
+        `• ${item.productName} (${item.variant.size}/${item.variant.color})\n` +
+        `  ${item.quantity} x ₹${item.price.toLocaleString('en-IN')} = ₹${item.total.toLocaleString('en-IN')}`
+    ).join('\n');
+
+    const discount = order.pricing.discount || order.pricing.couponDiscount || 0;
+    const totalAmount = order.pricing.totalAmount;
+
+    const msg = `🧾 *OFFICIAL RECEIPT*\n` +
+                `*${storeName.toUpperCase()}*\n` +
+                `──────────────────\n\n` +
+                `Greetings from Magizhchi! Your ${isOnline ? 'order' : 'bill'} is finalized.\n\n` +
+                `🆔 *${isOnline ? 'Order' : 'Bill'} #:* ${orderNo}\n` +
+                `📅 *Date:* ${new Date(isOnline ? order.createdAt : order.billDate).toLocaleDateString('en-IN')}\n\n` +
+                `🛒 *Items:*\n${items}\n\n` +
+                `──────────────────\n` +
+                `💵 *Subtotal:* ₹${order.pricing.subtotal.toLocaleString('en-IN')}\n` +
+                (discount > 0 ? `🧧 *Discount:* -₹${discount.toLocaleString('en-IN')}\n` : '') +
+                (isOnline && order.pricing.shippingCharges > 0 ? `🚚 *Shipping:* ₹${order.pricing.shippingCharges}\n` : '') +
+                `✨ *Total Amount:* ₹${totalAmount.toLocaleString('en-IN')}\n` +
+                `──────────────────\n\n` +
+                `👤 *Customer:* ${isOnline ? order.shippingAddress.name : order.customerDetails.name}\n` +
+                `💳 *Paid via:* ${order.paymentMethod.toUpperCase()}\n\n` +
+                `Thank you for shopping with us! 🙏`;
+
+    const mainImage = isOnline 
+        ? (order.items[0]?.productImage || order.items[0]?.productId?.images?.[0])
+        : (order.items[0]?.productId?.images?.[0] || order.items[0]?.productImage);
+
+    return await sendMessage(phone, msg, { image: mainImage });
+};
+
+process.on('exit', () => {});
+process.on('SIGINT', () => {});
+process.on('SIGTERM', () => {});
+
+const getStatus = () => ({
+    ready: isReady,
+    initializing: isInitializing,
+    qr: currentQR ? `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(currentQR)}&size=300x300` : null
+});
 
 module.exports = {
     initWhatsApp,
     sendMessage,
     sendWhatsAppOTP,
     sendWhatsAppNotification,
+    sendOrderReceiptToCustomer,
     sendOrderNotificationToAdmin,
     sendOrderCancellationNotificationToAdmin,
     sendContactMessageNotificationToAdmin,
@@ -380,5 +436,6 @@ module.exports = {
     sendStockAlertToAdmin,
     isReady: () => isReady,
     getQRLink: () => currentQR ? `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(currentQR)}&size=300x300` : null,
-    closeWhatsApp
+    closeWhatsApp,
+    getStatus
 };
