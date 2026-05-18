@@ -76,7 +76,7 @@ app.use(helmet({
 }));
 // BUG #16 FIX: Single merged cors() config — supports all origins including FRONTEND_URL env var
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'],
+  origin: (process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173']).map(o => o.trim()),
   credentials: true,
   optionsSuccessStatus: 200
 }));
@@ -94,15 +94,19 @@ const csrfProtection = (req, res, next) => {
 
   // Validate Origin/Referer matches the configured frontend strictly
   const origin = req.headers.origin || req.headers.referer;
-  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'];
+  const allowedOrigins = (process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173']).map(o => o.trim());
   
   let isValidOrigin = false;
   try {
     if (origin) {
       const originUrl = new URL(origin);
       isValidOrigin = allowedOrigins.some(allowed => {
-        const allowedUrl = new URL(allowed);
-        return originUrl.hostname === allowedUrl.hostname && originUrl.port === allowedUrl.port;
+        try {
+          const allowedUrl = new URL(allowed);
+          return originUrl.hostname === allowedUrl.hostname;
+        } catch (err) {
+          return false;
+        }
       });
     }
   } catch (e) {
