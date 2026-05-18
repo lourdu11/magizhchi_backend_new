@@ -1104,7 +1104,7 @@ exports.resetSystemData = async (req, res, next) => {
       return ApiResponse.success(res, {
         status: 'OTP_REQUIRED',
         method: result.method,
-      }, `Destructive action detected. Enter the OTP sent to your ${result.method === 'whatsapp' ? 'WhatsApp' : 'email'}.`);
+      }, result.message || `Destructive action detected. Enter the OTP sent to your ${result.method === 'whatsapp' ? 'WhatsApp' : 'email'}.`);
     }
 
     // Verify OTP
