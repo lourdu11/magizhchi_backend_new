@@ -1097,7 +1097,7 @@ exports.resetSystemData = async (req, res, next) => {
     logger.info(`🚨 CRITICAL ACTION: Admin initiated granular system data reset! Selections:`, selections);
 
     // ── LAYER 5: OTP VERIFICATION ──
-    const identifier = req.user.email || req.user.phone; // Assuming req.user is populated by auth middleware
+    const identifier = req.user.phone || req.user.email; // Assuming req.user is populated by auth middleware
     if (!otp) {
       logger.info(`🛡️ Data Reset OTP Challenge initiated for: ${identifier}`);
       const result = await sendOTP(identifier, 'data_reset_2fa');
