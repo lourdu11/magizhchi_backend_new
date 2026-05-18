@@ -5,6 +5,7 @@ const Category = require('./src/models/Category');
 const Product = require('./src/models/Product');
 const User = require('./src/models/User');
 const Settings = require('./src/models/Settings');
+const Inventory = require('./src/models/Inventory');
 
 const CATEGORIES = [
   { name: 'Shirts', slug: 'shirts', description: 'Formal and casual shirts', displayOrder: 1 },
@@ -285,8 +286,9 @@ async function seed() {
     Category.deleteMany({}),
     Product.deleteMany({}),
     Settings.deleteMany({}),
+    Inventory.deleteMany({}),
   ]);
-  console.log('🗑️  Cleared existing categories, products, settings');
+  console.log('🗑️  Cleared existing categories, products, settings, inventory');
 
   // Seed categories
   const cats = await Category.insertMany(CATEGORIES);
@@ -294,16 +296,40 @@ async function seed() {
   const catMap = {};
   cats.forEach(c => { catMap[c.slug] = c._id; });
 
-  // Seed products
+  // Seed products and inventory
   let created = 0;
   for (const p of SAMPLE_PRODUCTS) {
     const { categorySlug, ...productData } = p;
     const catId = catMap[categorySlug];
     if (!catId) { console.log(`⚠️  Category not found: ${categorySlug}`); continue; }
-    await Product.create({ ...productData, category: catId });
+    
+    // Create product
+    const createdProduct = await Product.create({ ...productData, category: catId });
     created++;
+
+    // Seed corresponding inventory for each variant of this product
+    if (productData.variants && productData.variants.length > 0) {
+      for (const variant of productData.variants) {
+        const variantSku = variant.sku || `${createdProduct.sku}-${variant.size}-${variant.color.replace(/\s+/g, '')}`;
+        await Inventory.create({
+          productName: createdProduct.name,
+          category: categorySlug.toUpperCase(),
+          color: variant.color || '',
+          size: variant.size,
+          sku: variantSku.toUpperCase(),
+          productRef: createdProduct._id,
+          totalStock: variant.stock || 20,
+          availableStock: variant.stock || 20,
+          purchasePrice: createdProduct.costPrice || 200,
+          sellingPrice: createdProduct.sellingPrice || 599,
+          onlineEnabled: true,
+          offlineEnabled: true,
+          isDeleted: false
+        });
+      }
+    }
   }
-  console.log(`✅ Seeded ${created} products`);
+  console.log(`✅ Seeded ${created} products with their matching inventory items`);
 
   // Delete old default admin to completely clean it out
   await User.deleteOne({ email: 'admin@magizhchi.com' });
