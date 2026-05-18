@@ -21,14 +21,29 @@ qr.png
 
 # Temporary / Scratch files
 scratch/
-test-edit.js
-checkAtlas.js
-migrateToCloud.js
-test_*.js
-seed_*.js
+scripts/
+*.scratch.js
 fix_*.js
+test_*.js
+check_*.js
+dump_*.js
+seed_*.js
 db_cleanup_*.js
-check_settings_*.js
+migrate_*.js
+rescue_*.js
+probe_*.js
+diagnose_*.js
+final_*.js
+list_*.js
+search_*.js
+add_*.js
+brevo_*.js
+cleanup_*.js
+clear_*.js
+deep_*.js
+mongodb_*.js
+run_*.js
+update_*.js
 
 # Logs
 logs/

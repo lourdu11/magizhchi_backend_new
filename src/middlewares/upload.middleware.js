@@ -1,26 +1,53 @@
 const multer = require('multer');
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const { fileTypeFromBuffer } = require('file-type');
 const cloudinary = require('../config/cloudinary');
 
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: async (req, file) => {
-    const isPdf = file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf');
-    return {
-      folder: 'magizhchi/products',
-      allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'pdf', 'gif', 'heic'],
-      resource_type: isPdf ? 'raw' : 'image',
-      transformation: isPdf ? [] : [
-        { width: 1200, height: 1200, crop: 'limit' },
-        { fetch_format: 'auto', quality: 'auto' }
-      ]
-    };
-  },
-});
+const ALLOWED_MIME_TYPES = [
+  'image/jpeg',
+  'image/png', 
+  'image/webp',
+  'application/pdf'
+];
+
+const storage = multer.memoryStorage();
 
 const upload = multer({ 
   storage: storage,
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 });
 
-module.exports = upload;
+const validateMimeType = async (req, res, next) => {
+  if (!req.file && !req.files) return next();
+
+  const files = req.file ? [req.file] : req.files;
+  
+  try {
+    for (const file of files) {
+      const type = await fileTypeFromBuffer(file.buffer);
+      if (!type || !ALLOWED_MIME_TYPES.includes(type.mime)) {
+        return res.status(400).json({ 
+          success: false, 
+          message: `File type not allowed: ${type?.mime || 'unknown'}` 
+        });
+      }
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
+};
+
+const uploadToCloudinary = (fileBuffer, folder = 'magizhchi/products') => {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { folder },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      }
+    );
+    uploadStream.end(fileBuffer);
+  });
+};
+
+module.exports = { upload, validateMimeType, uploadToCloudinary };

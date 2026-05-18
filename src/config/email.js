@@ -18,6 +18,15 @@ const getTransporter = async () => {
 
 const verifyEmailConfig = async () => {
   try {
+    const mongoose = require('mongoose');
+    const Settings = mongoose.model('Settings');
+    const settings = await Settings.findOne();
+    
+    if (settings?.notifications?.email?.host && settings?.notifications?.email?.user) {
+      logger.info(`📧 Email Service: Custom SMTP Relay active (${settings.notifications.email.host})`);
+      return true;
+    }
+
     logger.info('📧 Verifying Brevo API configuration...');
     const apiKey = process.env.BREVO_API_KEY;
     if (!apiKey) {

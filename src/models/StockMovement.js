@@ -33,6 +33,8 @@ const stockMovementSchema = new mongoose.Schema(
     performedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
     billId: { type: mongoose.Schema.Types.ObjectId, ref: 'Bill' },
+    referenceId: { type: mongoose.Schema.Types.ObjectId },
+    referenceModel: { type: String, enum: ['Purchase', 'Order', 'Bill'] },
     stockBefore: { type: Number },
     stockAfter: { type: Number },
     timestamp: { type: Date, default: Date.now },
@@ -40,6 +42,7 @@ const stockMovementSchema = new mongoose.Schema(
 );
 
 stockMovementSchema.index({ productId: 1 });
+stockMovementSchema.index({ inventoryId: 1 });
 stockMovementSchema.index({ timestamp: -1 });
 stockMovementSchema.index({ type: 1 });
 

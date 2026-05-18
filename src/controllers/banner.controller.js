@@ -1,5 +1,6 @@
 const Banner = require('../models/Banner');
 const ApiResponse = require('../utils/apiResponse');
+const { deleteFile } = require('../utils/fileHelper');
 
 // Get active banners (Public)
 exports.getActiveBanners = async (req, res, next) => {
@@ -30,6 +31,12 @@ exports.deleteBanner = async (req, res, next) => {
   try {
     const banner = await Banner.findByIdAndDelete(req.params.id);
     if (!banner) return ApiResponse.notFound(res, 'Banner not found');
+    
+    // Delete image from disk
+    if (banner.imageUrl) {
+      deleteFile(banner.imageUrl);
+    }
+
     return ApiResponse.success(res, null, 'Banner deleted');
   } catch (error) { next(error); }
 };

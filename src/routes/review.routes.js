@@ -2,7 +2,7 @@ const express = require('express');
 const r = express.Router();
 const c = require('../controllers/review.controller');
 const { protect, isAdmin } = require('../middlewares/auth');
-const upload = require('../middlewares/upload.middleware');
+const { upload, validateMimeType, uploadToCloudinary } = require('../middlewares/upload.middleware');
 
 // Public
 r.get('/product/:productId', c.getProductReviews);
@@ -10,10 +10,17 @@ r.get('/stats/:productId', c.getReviewStats);
 
 // User
 r.post('/create', protect, c.createReview);
-r.post('/upload', protect, upload.array('images', 5), (req, res) => {
-  if (!req.files) return res.status(400).json({ success: false, message: 'No images uploaded' });
-  const urls = req.files.map(file => file.path);
-  res.json({ success: true, urls });
+r.post('/upload', protect, upload.array('images', 5), validateMimeType, async (req, res) => {
+  if (!req.files || req.files.length === 0) return res.status(400).json({ success: false, message: 'No images uploaded' });
+  
+  try {
+    const uploadPromises = req.files.map(file => uploadToCloudinary(file.buffer, 'magizhchi/reviews'));
+    const results = await Promise.all(uploadPromises);
+    const urls = results.map(r => r.secure_url);
+    res.json({ success: true, urls });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 r.post('/:id/like', protect, c.likeReview);
 r.post('/:id/dislike', protect, c.dislikeReview);

@@ -78,6 +78,8 @@ exports.getInventory = async (req, res, next) => {
         $facet: {
           data: [
             ...pipeline,
+            { $lookup: { from: 'products', localField: 'productRef', foreignField: '_id', as: 'productRef' } },
+            { $unwind: { path: '$productRef', preserveNullAndEmptyArrays: true } },
             { $sort: { createdAt: -1 } },
             { $skip: skipNum },
             { $limit: limitNum }
@@ -105,11 +107,30 @@ exports.getInventory = async (req, res, next) => {
 // ── GET /admin/inventory/low-stock ────────────────────────────────────────────
 exports.getLowStock = async (req, res, next) => {
   try {
-    const items = await Inventory.find().lean({ virtuals: true });
-    const low = items.filter(i => {
-      const avail = Math.max(0, i.totalStock - i.onlineSold - i.offlineSold - (i.reservedStock || 0) + i.returned - i.damaged);
-      return avail <= (i.lowStockThreshold || 5);
-    });
+    // BUG #12 FIX: Push filter to MongoDB — never load all records into Node.js memory
+    const low = await Inventory.aggregate([
+      { $match: { isDeleted: { $ne: true } } },
+      {
+        $addFields: {
+          computedAvail: {
+            $max: [0, {
+              $subtract: [
+                { $add: ['$totalStock', { $ifNull: ['$returned', 0] }] },
+                { $add: ['$onlineSold', '$offlineSold', { $ifNull: ['$reservedStock', 0] }, '$damaged'] }
+              ]
+            }]
+          }
+        }
+      },
+      {
+        $match: {
+          computedAvail: { $gt: 0 },
+          $expr: { $lte: ['$computedAvail', { $ifNull: ['$lowStockThreshold', 5] }] }
+        }
+      },
+      { $sort: { computedAvail: 1 } },
+      { $limit: 50 }
+    ]);
     return ApiResponse.success(res, low);
   } catch (error) { next(error); }
 };
@@ -215,9 +236,8 @@ exports.updateSellingPrice = async (req, res, next) => {
 
     // ── SYNC WITH PRODUCT DISPLAY ──
     if (item.productRef) {
-      await require('../models/Product').findByIdAndUpdate(item.productRef, {
-        sellingPrice: Number(sellingPrice)
-      });
+       const SyncService = require('../services/sync.service');
+       await SyncService.syncProductStock(item.productRef);
     }
 
     return ApiResponse.success(res, item, 'Selling price updated and synced with product display');
@@ -288,33 +308,33 @@ exports.adjustStock = async (req, res, next) => {
     switch (type) {
       case 'add':
       case 'correction_add':
-        updateData = { $inc: { totalStock: qty } };
+        updateData = { $inc: { totalStock: qty, availableStock: qty } };
         movementType = 'audit_correction';
         break;
       case 'return':
-        updateData = { $inc: { returned: qty } }; // Log as returned units
+        updateData = { $inc: { returned: qty, availableStock: qty } }; // Log as returned units
         movementType = 'return_customer';
         break;
       case 'exchange_in':
-        updateData = { $inc: { totalStock: qty } };
+        updateData = { $inc: { totalStock: qty, availableStock: qty } };
         movementType = 'exchange_in';
         break;
       case 'subtract':
       case 'correction_remove':
-        updateData = { $inc: { totalStock: -qty } };
+        updateData = { $inc: { totalStock: -qty, availableStock: -qty } };
         movementType = 'audit_correction';
         break;
       case 'exchange_out':
-        updateData = { $inc: { totalStock: -qty } };
+        updateData = { $inc: { totalStock: -qty, availableStock: -qty } };
         movementType = 'exchange_out';
         break;
       case 'damage':
       case 'wastage':
-        updateData = { $inc: { damaged: qty } }; // Log as damaged units
+        updateData = { $inc: { damaged: qty, availableStock: -qty } }; // Log as damaged units
         movementType = 'damage_wastage';
         break;
       case 'sale_correction':
-        updateData = { $inc: { totalStock: -qty } };
+        updateData = { $inc: { totalStock: -qty, availableStock: -qty } };
         movementType = 'sale_correction';
         break;
       default:
@@ -340,6 +360,12 @@ exports.adjustStock = async (req, res, next) => {
     // ── TRIGGER STOCK ALERT ──
     const { checkAndAlertLowStock } = require('../utils/lowStockAlert');
     await checkAndAlertLowStock(updated, stockBefore);
+
+    // ── SYNC WITH PRODUCT DOCUMENT ──
+    if (item.productRef) {
+      const SyncService = require('../services/sync.service');
+      await SyncService.syncProductStock(item.productRef);
+    }
 
     return ApiResponse.success(res, updated, 'Inventory reconciled and logged');
   } catch (error) { next(error); }
@@ -379,14 +405,29 @@ exports.deleteInventoryItem = async (req, res, next) => {
       await item.save();
 
       // Check if parent product has remaining active variants
-      if (parentProductRef) {
-        const remainingVariants = await Inventory.countDocuments({
-          productRef: parentProductRef,
-          isDeleted: { $ne: true }
-        });
-        if (remainingVariants === 0) {
-          // No active variants left — deactivate the product from web catalog
-          await require('../models/Product').findByIdAndUpdate(parentProductRef, { isActive: false });
+      if (parentProductRef || item.procurementProductId) {
+        const Product = require('../models/Product');
+        let parent = parentProductRef ? await Product.findById(parentProductRef) : null;
+        if (!parent && item.procurementProductId) {
+          parent = await Product.findOne({ procurementSourceId: item.procurementProductId });
+        }
+
+        if (parent) {
+          const remainingVariants = await Inventory.countDocuments({
+            productRef: parent._id,
+            isDeleted: { $ne: true }
+          });
+          if (remainingVariants === 0) {
+            // No active variants left — deactivate and archive the product globally
+            await Product.findByIdAndUpdate(parent._id, { 
+              isActive: false, 
+              isDeleted: true,
+              deletedAt: new Date(),
+              isOnlineProduct: false,
+              isBillingProduct: false,
+              isInventoryProduct: false
+            });
+          }
         }
       }
 
@@ -397,13 +438,28 @@ exports.deleteInventoryItem = async (req, res, next) => {
     await Inventory.findByIdAndDelete(req.params.id);
 
     // Check if parent product has remaining active variants
-    if (parentProductRef) {
-      const remainingVariants = await Inventory.countDocuments({
-        productRef: parentProductRef,
-        isDeleted: { $ne: true }
-      });
-      if (remainingVariants === 0) {
-        await require('../models/Product').findByIdAndUpdate(parentProductRef, { isActive: false });
+    if (parentProductRef || item.procurementProductId) {
+      const Product = require('../models/Product');
+      let parent = parentProductRef ? await Product.findById(parentProductRef) : null;
+      if (!parent && item.procurementProductId) {
+        parent = await Product.findOne({ procurementSourceId: item.procurementProductId });
+      }
+
+      if (parent) {
+        const remainingVariants = await Inventory.countDocuments({
+          productRef: parent._id,
+          isDeleted: { $ne: true }
+        });
+        if (remainingVariants === 0) {
+          await Product.findByIdAndUpdate(parent._id, { 
+            isActive: false, 
+            isDeleted: true,
+            deletedAt: new Date(),
+            isOnlineProduct: false,
+            isBillingProduct: false,
+            isInventoryProduct: false
+          });
+        }
       }
     }
 
@@ -477,9 +533,9 @@ exports.createInventoryItem = async (req, res, next) => {
         initials = (firstInit + secondInit).toUpperCase();
       }
       const skuBase = `${initials}-${size.trim()}`.toUpperCase().replace(/\s+/g, '');
-      const totalCount = await Inventory.countDocuments({});
-      const sequenceSuffix = String(totalCount + 1).padStart(3, '0');
-      finalSku = `${skuBase}-${sequenceSuffix}`;
+      const { getNextSequence } = require('../utils/generateNumbers');
+      const seq = await getNextSequence(`SKU-${initials}`);
+      finalSku = `${skuBase}-${String(seq).padStart(4, '0')}`;
     } else {
       finalSku = finalSku.trim().toUpperCase().replace(/\s+/g, '');
     }
@@ -490,6 +546,8 @@ exports.createInventoryItem = async (req, res, next) => {
     const finalCategory = category || parentProduct?.category || 'Uncategorized';
     const finalSellingPrice = Number(sellingPrice) || parentProduct?.sellingPrice || Number(purchasePrice) * 1.5 || 0;
     const images = (parentProduct?.images?.length > 0) ? [parentProduct.images[0]] : [];
+
+    const stockToInit = Number(req.body.totalStock) || 0;
 
     const newItem = await Inventory.create({
       productName: productName.trim(),
@@ -505,9 +563,90 @@ exports.createInventoryItem = async (req, res, next) => {
       offlineEnabled: offlineEnabled !== false,
       productRef: finalProductRef || null,
       images,
-      totalStock: 0 // New variants start with 0 stock
+      totalStock: stockToInit 
     });
 
-    return ApiResponse.created(res, newItem, 'Variant created successfully and synced to catalog');
+    // Create movement record for manual init
+    if (stockToInit > 0) {
+      await StockMovement.create({
+        inventoryId: newItem._id,
+        type: 'purchase',
+        quantity: stockToInit,
+        reason: 'Manual Inventory Initialization',
+        performedBy: req.user?._id
+      });
+    }
+
+    return ApiResponse.created(res, newItem, 'Variant created successfully with initial stock');
+  } catch (error) { next(error); }
+};
+
+// ── POST /admin/inventory/restore-channels ────────────────────────────────────
+// One-click fix: re-enables Web + POS for ALL in-stock items where either channel is currently OFF.
+// Intended as an admin recovery tool, not regular workflow.
+exports.restoreAllChannels = async (req, res, next) => {
+  try {
+    // Find all non-deleted, in-stock items where at least one channel is OFF
+    const disabledItems = await Inventory.find({
+      isDeleted: { $ne: true },
+      availableStock: { $gt: 0 },
+      $or: [
+        { onlineEnabled: false },
+        { offlineEnabled: false }
+      ]
+    }).select('_id productName size color onlineEnabled offlineEnabled availableStock');
+
+    if (disabledItems.length === 0) {
+      return ApiResponse.success(res, { restored: 0, items: [] }, 'All channels already correct — no fixes needed');
+    }
+
+    // Enable both channels for all of them atomically
+    const ids = disabledItems.map(i => i._id);
+    const result = await Inventory.updateMany(
+      { _id: { $in: ids } },
+      { $set: { onlineEnabled: true, offlineEnabled: true } }
+    );
+
+    // ✅ PHASE 2: ORPHANED CLEANUP
+    // Find items with 0 totalStock that have NO purchase history (orphaned by bill deletion)
+    const StockMovement = require('../models/StockMovement');
+    const potentiallyOrphaned = await Inventory.find({
+      isDeleted: { $ne: true },
+      totalStock: { $lte: 0 }
+    }).select('_id');
+
+    let purgedCount = 0;
+    if (potentiallyOrphaned.length > 0) {
+      for (const item of potentiallyOrphaned) {
+        const hasHistory = await StockMovement.findOne({ 
+          inventoryId: item._id, 
+          type: 'purchase' 
+        });
+        if (!hasHistory) {
+          await Inventory.findByIdAndUpdate(item._id, { $set: { isDeleted: true } });
+          purgedCount++;
+        }
+      }
+    }
+
+    return ApiResponse.success(res, {
+      restored: result.modifiedCount,
+      purged: purgedCount,
+      items: disabledItems.map(i => ({
+        name: i.productName,
+        size: i.size,
+        color: i.color,
+        stock: i.availableStock,
+        was: { web: i.onlineEnabled, pos: i.offlineEnabled }
+      }))
+    }, `✅ Done: Restored ${result.modifiedCount} variant(s) and purged ${purgedCount} orphaned record(s).`);
+  } catch (error) { next(error); }
+};
+
+exports.syncAllStock = async (req, res, next) => {
+  try {
+    const SyncService = require('../services/sync.service');
+    const results = await SyncService.runAuditAndRepair();
+    return ApiResponse.success(res, results, 'Global stock synchronization complete');
   } catch (error) { next(error); }
 };

@@ -6,6 +6,12 @@ const categorySchema = new mongoose.Schema(
     slug: { type: String, unique: true, lowercase: true, trim: true },
     description: { type: String, trim: true },
     image: { type: String },
+    tabletImage: { type: String },
+    mobileImage: { type: String },
+    fit: { type: String, default: 'cover' },
+    position: { type: String, default: 'center' },
+    scale: { type: Number, default: 1 },
+    gravity: { type: String, default: 'auto' },
     parentCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
     isActive: { type: Boolean, default: true },
     sizeChart: { type: String }, // URL to size chart image

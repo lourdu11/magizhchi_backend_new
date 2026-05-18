@@ -10,8 +10,17 @@ const bannerSchema = new mongoose.Schema({
     required: [true, 'Desktop image is required'],
   },
   mobileImage: {
-    type: String, // Optimized for mobile screens
+    type: String, 
   },
+  subtitle: String,
+  desktopFit: { type: String, default: 'cover' },
+  desktopPos: { type: String, default: 'center' },
+  desktopScale: { type: Number, default: 1 },
+  desktopGravity: { type: String, default: 'auto' },
+  mobileFit: { type: String, default: 'cover' },
+  mobilePos: { type: String, default: 'center' },
+  mobileScale: { type: Number, default: 1 },
+  mobileGravity: { type: String, default: 'auto' },
   link: {
     type: String,
     default: '/',

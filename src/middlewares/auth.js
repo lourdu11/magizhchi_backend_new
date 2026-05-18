@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const ApiResponse = require('../utils/apiResponse');
+const logger = require('../utils/logger');
 
 /**
  * Verify JWT token from Authorization header or httpOnly cookie
@@ -43,10 +44,33 @@ const protect = async (req, res, next) => {
  * Allow access only to specific roles
  */
 const authorize = (...roles) => {
-  return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
-      return ApiResponse.forbidden(res, `Role '${req.user.role}' is not authorized.`);
+  return async (req, res, next) => {
+    if (!req.user) {
+      console.error('[AUTH ERROR] No user found in request during authorization check.');
+      return ApiResponse.unauthorized(res, 'Authentication required.');
     }
+
+    let userRole = String(req.user.role || 'guest').toLowerCase().trim();
+    const allowedRoles = roles.map(r => String(r).toLowerCase().trim());
+    
+    // DEV-FRIENDLY: If access denied, check DB once to see if role was recently promoted
+    if (!allowedRoles.includes(userRole)) {
+      try {
+        const liveUser = await User.findById(req.user._id);
+        if (liveUser && liveUser.role) {
+          userRole = liveUser.role.toLowerCase().trim();
+          // Update req.user for subsequent middlewares
+          req.user.role = liveUser.role;
+        }
+      } catch (err) {
+        // Fallback to original token role
+      }
+    }
+
+    if (!allowedRoles.includes(userRole)) {
+      return ApiResponse.forbidden(res, `Role '${userRole}' is not authorized to access this resource.`);
+    }
+    
     next();
   };
 };
@@ -54,6 +78,12 @@ const authorize = (...roles) => {
 const isAdmin = authorize('admin');
 const isStaff = authorize('admin', 'staff');
 const isUser = authorize('admin', 'staff', 'user');
+
+// ── Enterprise Permission Helpers ──────────────────────────────
+const canViewBills = isStaff;     // Admin + Staff can see POS data
+const canEditInventory = isStaff; // Admin + Staff can scan/adjust stock
+const canManageOrders = isStaff;  // Admin + Staff can ship orders
+const canAdminister = isAdmin;    // Only Admin can delete/configure
 
 /**
  * Optional auth - attaches user if token exists, proceeds regardless
@@ -84,4 +114,9 @@ const optionalAuth = async (req, res, next) => {
   next();
 };
 
-module.exports = { protect, authorize, isAdmin, isStaff, isUser, optionalAuth };
+module.exports = { 
+  protect, authorize, 
+  isAdmin, isStaff, isUser, 
+  optionalAuth,
+  canViewBills, canEditInventory, canManageOrders, canAdminister
+};

@@ -2,16 +2,29 @@ const mongoose = require('mongoose');
 
 const orderItemSchema = new mongoose.Schema({
   productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+  inventoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Inventory' }, // Main ID (can be null for combos)
   productName: { type: String, required: true },
   productImage: { type: String },
   sku: { type: String },
   hsnCode: { type: String, default: '6205' },
   variant: {
-    size: { type: String, required: true },
+    size: { type: String, required: false }, // Optional for combos
     color: { type: String },
   },
+  isCombo: { type: Boolean, default: false },
+  comboSelections: [
+    {
+      productRef: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+      inventoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Inventory' },
+      productName: { type: String },
+      size: { type: String },
+      color: { type: String },
+      sku: { type: String }
+    }
+  ],
   quantity: { type: Number, required: true, min: 1 },
   price: { type: Number, required: true },
+  purchasePrice: { type: Number, default: 0 },
   discount: { type: Number, default: 0 },
   taxableValue: { type: Number },
   cgst: { type: Number, default: 0 },
@@ -58,7 +71,7 @@ const orderSchema = new mongoose.Schema(
     },
     paymentStatus: {
       type: String,
-      enum: ['pending', 'completed', 'failed', 'refunded'],
+      enum: ['pending', 'cod_pending', 'completed', 'failed', 'refunded'],
       default: 'pending',
     },
     paymentDetails: {
@@ -116,6 +129,8 @@ orderSchema.index({ createdAt: -1 });
 orderSchema.index({ 'items.productId': 1 });
 orderSchema.index({ 'items.inventoryId': 1 });
 orderSchema.index({ orderNumber: 1, 'shippingAddress.name': 1, 'shippingAddress.phone': 1 });
+orderSchema.index({ orderStatus: 1, createdAt: -1 });
+orderSchema.index({ isGuestOrder: 1, createdAt: -1 });
 
 
 module.exports = mongoose.model('Order', orderSchema);

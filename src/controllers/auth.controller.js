@@ -2,12 +2,13 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { sendOTP, verifyOTP } = require('../services/otp.service');
 const ApiResponse = require('../utils/apiResponse');
+const { logAudit } = require('../utils/auditLogger');
 const logger = require('../utils/logger');
 
 // ─── Helpers ──────────────────────────────────────────────────
 const generateTokens = (userId) => ({
   accessToken: jwt.sign({ id: userId }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRE || '1d',
+    expiresIn: process.env.JWT_EXPIRE || '15m',
   }),
   refreshToken: jwt.sign({ id: userId }, process.env.JWT_REFRESH_SECRET, {
     expiresIn: process.env.JWT_REFRESH_EXPIRE || '7d',
@@ -24,15 +25,17 @@ const setCookies = (res, accessToken, refreshToken) => {
   res.cookie('refreshToken', refreshToken, { ...opts, maxAge: 7 * 24 * 60 * 60 * 1000 });
 };
 
+const { normalizePhone } = require('../utils/normalize');
+
 const isEmail = (str) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str);
-const isPhone = (str) => /^\d{10}$/.test(str.replace(/\D/g, ''));
+const isPhone = (str) => /^\d{10}$/.test(normalizePhone(str));
 
 const buildQuery = (identifier) =>
-  isEmail(identifier) ? { email: identifier.toLowerCase() } : { phone: identifier.replace(/\D/g, '') };
+  isEmail(identifier) ? { email: identifier.toLowerCase() } : { phone: normalizePhone(identifier) };
 
 const autoName = (identifier) => {
   if (isEmail(identifier)) return identifier.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-  return `User${identifier.slice(-4)}`;
+  return `User${normalizePhone(identifier).slice(-4)}`;
 };
 
 // ─── POST /auth/login (Smart: auto-creates on first visit) ────
@@ -114,6 +117,8 @@ exports.login = async (req, res, next) => {
 
     const message = isNewUser ? 'Account created & logged in!' : 'Login successful!';
     logger.info(`${isNewUser ? 'Created' : 'Login'}: ${identifier}`);
+
+    logAudit({ userId: user._id, action: isNewUser ? 'SIGNUP' : 'LOGIN', module: 'AUTH', details: { identifier } });
 
     return ApiResponse.success(res, {
       user: { _id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, isNewUser },
@@ -283,6 +288,8 @@ exports.resetPassword = async (req, res, next) => {
     setCookies(res, accessToken, refreshToken);
 
     logger.info(`Password reset success: ${identifier}`);
+    logAudit({ userId: user._id, action: 'PASSWORD_RESET', module: 'AUTH', details: { identifier } });
+
     return ApiResponse.success(res, {
       user: { _id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role },
       accessToken,
@@ -365,21 +372,23 @@ exports.changePassword = async (req, res, next) => {
  */
 exports.quickGuestUser = async (req, res, next) => {
   try {
-    // 1. Get the current guest count to determine the next sequential ID
-    const guestCount = await User.countDocuments({ role: 'user', email: { $regex: /@dummy\.com$/ } });
-    const paddedId = String(guestCount + 1).padStart(10, '0');
+    // 1. Generate a sequential 10-digit numeric ID using getNextSequence
+    const { getNextSequence } = require('../utils/generateNumbers');
+    const seq = await getNextSequence('guest_user');
+    const uniqueId = String(seq).padStart(10, '0');
     
-    const guestName = `Guest_${paddedId}`;
-    const guestEmail = `guest_${paddedId}@dummy.com`;
-    const guestPhone = `00${paddedId.slice(-8)}`; // Unique dummy phone to satisfy unique index
+    const guestName = `Guest_${uniqueId}`;
+    const guestEmail = `guest_${uniqueId}@dummy.com`;
+    const guestPhone = uniqueId; 
     
-    const uniqueId = Date.now().toString().slice(-6); // For password uniqueness
+    const passwordSuffix = Date.now().toString().slice(-6); // For password uniqueness
+    const guestPassword = `guest_${uniqueId}_${passwordSuffix}_secret`;
 
     const user = await User.create({
       name: guestName,
       email: guestEmail,
       phone: guestPhone,
-      password: `guest_${paddedId}_${uniqueId}_secret`,
+      password: guestPassword,
       role: 'user',
       isVerified: true
     });

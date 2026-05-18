@@ -2,21 +2,65 @@ const Order = require('../models/Order');
 const User = require('../models/User');
 const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
+const stockService = require('../services/stockService');
+const { getIO } = require('../utils/socket');
 const Coupon = require('../models/Coupon');
 const Cart = require('../models/Cart');
 const StockMovement = require('../models/StockMovement');
+const StockService = require('../services/stock.service');
+const { clearDashboardCache } = require('./admin.controller');
 const Settings = require('../models/Settings');
 const { razorpay, isConfigured: isRazorpayConfigured } = require('../config/razorpay');
 const { sendOrderConfirmationEmail } = require('../services/email.service');
 const { sendOrderNotificationToAdmin, sendOrderCancellationNotificationToAdmin, sendOrderReceiptToCustomer } = require('../services/whatsapp.service');
+const { logAudit } = require('../utils/auditLogger');
+const { normalizePhone } = require('../utils/normalize');
 const ApiResponse = require('../utils/apiResponse');
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 const logger = require('../utils/logger');
+
+exports.reserveStock = async (req, res, next) => {
+  try {
+    const { items } = req.body;
+    if (!items || !items.length) {
+      return ApiResponse.error(res, 'No items provided', 400);
+    }
+
+    const results = [];
+    for (const item of items) {
+      const inv = await StockService.reserveStock(
+        item.inventoryId, 
+        Number(item.quantity) || 1, 
+        new mongoose.Types.ObjectId() // Dummy Order ID
+      );
+      results.push({
+        inventoryId: inv._id,
+        reservedStock: inv.reservedStock,
+        expiresAt: inv.reservationExpiresAt
+      });
+    }
+
+    return ApiResponse.success(res, { results }, 'Stock reserved successfully', 201);
+  } catch (error) {
+    next(error);
+  }
+};
 
 // POST /orders/create
 exports.createOrder = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
     const { items, shippingAddress, billingAddress, paymentMethod, couponCode, notes, guestDetails } = req.body;
+    
+    if (shippingAddress?.phone) shippingAddress.phone = normalizePhone(shippingAddress.phone);
+    if (guestDetails?.phone) guestDetails.phone = normalizePhone(guestDetails.phone);
+    
+    // TASK 7: Empty Cart Block
+    if (!items || items.length === 0) {
+      return ApiResponse.error(res, 'Order must have at least one item', 400);
+    }
 
     const settings = await Settings.findOne() || {};
     const shippingConfig = settings.shipping || { flatRateTN: 50, flatRateOut: 100, freeShippingThreshold: 999 };
@@ -35,60 +79,109 @@ exports.createOrder = async (req, res, next) => {
       const product = await Product.findById(item.productId);
       if (!product || !product.isActive) throw { message: `Product not available: ${item.productId}`, statusCode: 400 };
 
-      // Find matching Inventory row (case-insensitive)
-      const invItem = await Inventory.findOne({
-        productName: { $regex: new RegExp('^' + product.name.trim() + '$', 'i') },
-        size: { $regex: new RegExp('^' + item.size.trim() + '$', 'i') },
-        color: { $regex: new RegExp('^' + item.color.trim() + '$', 'i') },
-        onlineEnabled: true
-      });
+      // Helper to get aggregate stock and inventory ID for a variant
+      const getAggregateStock = async (pRef, pName, size, color) => {
+        const query = {
+          $or: [
+            { productRef: pRef, size: { $regex: new RegExp(`^${size}$`, 'i') }, color: { $regex: new RegExp(`^${color}$`, 'i') } },
+            { productName: pName, size: { $regex: new RegExp(`^${size}$`, 'i') }, color: { $regex: new RegExp(`^${color}$`, 'i') } }
+          ],
+          onlineEnabled: true,
+          isDeleted: false
+        };
+        const invItems = await Inventory.find(query).session(session);
+        if (invItems.length === 0) return null;
+        
+        const totalAvailable = invItems.reduce((sum, inv) => {
+          const avail = (inv.totalStock || 0) - (inv.onlineSold || 0) - (inv.offlineSold || 0) - (inv.reservedStock || 0) + (inv.returned || 0) - (inv.damaged || 0);
+          return sum + Math.max(0, avail);
+        }, 0);
+        
+        return { totalAvailable, inventoryId: invItems[0]._id, sku: invItems[0].sku, purchasePrice: invItems[0].purchasePrice };
+      };
 
-      if (!invItem) throw { message: `Inventory not found for ${product.name} (${item.size}/${item.color})`, statusCode: 404 };
+      const price = Number(product.discountedPrice || product.sellingPrice || 0);
+      const qty = Number(item.quantity);
+      
+      console.log(`[ORDER DEBUG] Product: ${product.name}, Selling: ${product.sellingPrice}, Discounted: ${product.discountedPrice}, Final Price: ${price}`);
 
-      // Formula for available: totalStock - onlineSold - offlineSold - reservedStock + returned - damaged
-      const available = (invItem.totalStock || 0) - (invItem.onlineSold || 0) - (invItem.offlineSold || 0) - (invItem.reservedStock || 0) + (invItem.returned || 0) - (invItem.damaged || 0);
-      if (available < item.quantity) throw { message: `Insufficient stock for ${product.name}`, statusCode: 400 };
+      if (!qty || qty < 1) throw { message: `Invalid quantity for ${product.name}. Min 1 required.`, statusCode: 400 };
 
-      const price = Number(product.sellingPrice || invItem.sellingPrice || 0);
-      const qty = Number(item.quantity || 1);
       const gstRate = Number(product.gstPercentage || 5) / 100;
       const taxableValue = parseFloat((price * qty / (1 + gstRate)).toFixed(2));
       const gstAmount = parseFloat((price * qty - taxableValue).toFixed(2));
       const itemTotal = price * qty;
+      
+      console.log(`[ORDER DEBUG] Item Total: ${itemTotal}, Subtotal Before: ${subtotal}`);
 
-      orderItems.push({
-        productId: product._id, productName: product.name,
-        productImage: product.images[0], sku: invItem.sku || product.sku,
-        hsnCode: product.hsnCode || '6205',
-        variant: { size: item.size, color: item.color },
-        quantity: qty, price,
-        taxableValue, cgst: gstAmount / 2, sgst: gstAmount / 2, total: itemTotal,
-        inventoryId: invItem._id
-      });
-      subtotal += itemTotal;
+      // ─── CASE A: COMBO PRODUCT ──────────────────────────────────
+      if (item.isCombo || product.productNature === 'combo') {
+        if (!item.comboSelections || !item.comboSelections.length) 
+           throw { message: `Bundle configuration missing for ${product.name}`, statusCode: 400 };
+
+        const selectionsWithInv = [];
+        for (const selection of item.comboSelections) {
+          const stock = await getAggregateStock(selection.productRef, selection.productName, selection.size, selection.color);
+          if (!stock) throw { message: `Inventory not found for ${selection.productName} (${selection.size}/${selection.color})`, statusCode: 404 };
+          if (stock.totalAvailable < qty) throw { message: `Insufficient stock for ${selection.productName} in bundle`, statusCode: 400 };
+          
+          selectionsWithInv.push({
+            ...selection,
+            inventoryId: stock.inventoryId,
+            sku: stock.sku,
+            purchasePrice: stock.purchasePrice || 0
+          });
+        }
+
+        orderItems.push({
+          productId: product._id, productName: product.name,
+          productImage: product.images[0], sku: product.sku,
+          hsnCode: product.hsnCode || '6205',
+          isCombo: true, comboSelections: selectionsWithInv,
+          quantity: qty, price,
+          taxableValue, cgst: gstAmount / 2, sgst: gstAmount / 2, total: itemTotal,
+        });
+      }
+      // ─── CASE B: STANDALONE PRODUCT ─────────────────────────────
+      else {
+        const stock = await getAggregateStock(product._id, product.name, item.size, item.color);
+        if (!stock) throw { message: `Inventory not found for ${product.name} (${item.size}/${item.color})`, statusCode: 404 };
+        if (stock.totalAvailable < qty) throw { message: `Insufficient stock for ${product.name}`, statusCode: 400 };
+
+        orderItems.push({
+          productId: product._id, productName: product.name,
+          productImage: product.images[0], sku: stock.sku || product.sku,
+          hsnCode: product.hsnCode || '6205',
+          variant: { size: item.size, color: item.color },
+          quantity: qty, price,
+          purchasePrice: stock.purchasePrice || 0,
+          taxableValue, cgst: gstAmount / 2, sgst: gstAmount / 2, total: itemTotal,
+          inventoryId: stock.inventoryId
+        });
+      }
+      
+      subtotal = Math.round((subtotal * 100 + itemTotal * 100)) / 100;
     }
 
     // 2. Coupon logic
     let couponDiscount = 0;
     if (couponCode) {
-      const coupon = await Coupon.findOne({ code: couponCode.toUpperCase(), isActive: true });
+      const coupon = await Coupon.findOne({ code: couponCode.toUpperCase(), isActive: true }).session(session);
       if (coupon && new Date() >= coupon.validFrom && new Date() <= coupon.validTo) {
         if (subtotal >= coupon.minPurchaseAmount) {
           couponDiscount = coupon.discountType === 'percentage' 
             ? Math.min((subtotal * (coupon.discountValue || 0)) / 100, coupon.maxDiscountAmount || Infinity)
             : Math.min(coupon.discountValue || 0, subtotal);
           
-          // Only push to usedBy if user is authenticated
           const couponUpdate = { $inc: { usageCount: 1 } };
           if (req.user?._id) couponUpdate.$push = { usedBy: req.user._id };
-          await Coupon.findByIdAndUpdate(coupon._id, couponUpdate);
+          await Coupon.findByIdAndUpdate(coupon._id, couponUpdate).session(session);
         }
       }
     }
 
     const afterDiscount = subtotal - couponDiscount;
     const totalGst = orderItems.reduce((sum, item) => sum + (Number(item.cgst || 0) + Number(item.sgst || 0)), 0);
-    // Use state-based shipping rate (Tamil Nadu vs rest of India)
     const isTN = (shippingAddress?.state || '').toLowerCase().includes('tamil');
     const flatRate = isTN
       ? (shippingConfig.flatRateTN ?? shippingConfig.flatRate ?? 50)
@@ -96,23 +189,18 @@ exports.createOrder = async (req, res, next) => {
     const shipping = afterDiscount >= shippingConfig.freeShippingThreshold ? 0 : flatRate;
     const totalAmount = parseFloat((afterDiscount + shipping).toFixed(2));
 
-    // 3. Reserve stock in Inventory (Atomic)
+    // 3. Final Stock Check before placement
     for (const item of orderItems) {
-      const reserveResult = await Inventory.updateOne(
-        { 
-          _id: item.inventoryId,
-          $expr: {
-            $gte: [
-              { $subtract: [{ $add: ["$totalStock", "$returned"] }, { $add: ["$onlineSold", "$offlineSold", "$reservedStock", "$damaged"] }] },
-              item.quantity
-            ]
-          }
-        },
-        { $inc: { reservedStock: item.quantity } }
-      );
-
-      if (reserveResult.modifiedCount === 0) {
-        throw { message: `Stock collision for ${item.productName}. Please refresh.`, statusCode: 400 };
+      if (item.isCombo) {
+        for (const sel of item.comboSelections) {
+           const inv = await Inventory.findById(sel.inventoryId).session(session);
+           const available = (inv.totalStock || 0) - (inv.onlineSold || 0) - (inv.offlineSold || 0) - (inv.reservedStock || 0) + (inv.returned || 0) - (inv.damaged || 0);
+           if (!inv || available < item.quantity) throw { message: `Stock just ran out for ${sel.productName} in bundle.`, statusCode: 400 };
+        }
+      } else {
+        const inv = await Inventory.findById(item.inventoryId).session(session);
+        const available = (inv.totalStock || 0) - (inv.onlineSold || 0) - (inv.offlineSold || 0) - (inv.reservedStock || 0) + (inv.returned || 0) - (inv.damaged || 0);
+        if (!inv || available < item.quantity) throw { message: `Stock just ran out for ${item.productName}.`, statusCode: 400 };
       }
     }
 
@@ -127,15 +215,23 @@ exports.createOrder = async (req, res, next) => {
       });
     }
 
-    // 5. Generate Global Sequential Order Number (10 digits padded)
-    const totalOrders = await Order.countDocuments();
-    const sequentialOrderNumber = `ORD-${String(totalOrders + 1).padStart(10, '0')}`;
+    // 5. Generate Order Number
+    const { getNextSequence } = require('../utils/generateNumbers');
+    const seq = await getNextSequence('order', session);
+    const sequentialOrderNumber = `ORD-${String(seq).padStart(10, '0')}`;
 
-    const order = await Order.create({
+    const isGuest = !req.user || (req.user && req.user.name && req.user.name.startsWith('Guest_'));
+    const finalGuestDetails = guestDetails || (isGuest && req.user ? {
+      name: shippingAddress?.name || req.user.name,
+      email: req.user.email,
+      phone: shippingAddress?.phone || req.user.phone
+    } : undefined);
+
+    const [order] = await Order.create([{
       orderNumber: sequentialOrderNumber,
       userId: req.user?._id || null,
-      isGuestOrder: !req.user,
-      guestDetails,
+      isGuestOrder: isGuest,
+      guestDetails: finalGuestDetails,
       items: orderItems,
       pricing: { subtotal, couponDiscount, gstAmount: totalGst, shippingCharges: shipping, totalAmount },
       shippingAddress, billingAddress: billingAddress || shippingAddress,
@@ -144,9 +240,52 @@ exports.createOrder = async (req, res, next) => {
       paymentDetails: razorpayOrder ? { razorpayOrderId: razorpayOrder.id } : {},
       couponCode, notes,
       statusHistory: [{ status: 'placed', updatedAt: new Date() }],
-    });
+    }], { session });
 
-    if (paymentMethod === 'cod') await confirmStockSale(order.items, order._id);
+    // 6. RESERVE STOCK (Single Source of Truth)
+    const affectedProductIds = new Set();
+    for (const item of order.items) {
+      const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
+      for (const sel of selections) {
+         const result = await Inventory.findOneAndUpdate(
+           { _id: sel.inventoryId, availableStock: { $gte: item.quantity }, isDeleted: { $ne: true } },
+           { $inc: { availableStock: -item.quantity, reservedStock: item.quantity } },
+           { session, new: true }
+         );
+         if (!result) throw { message: `Stock collision for ${sel.productName}. Refresh and try again.`, statusCode: 400 };
+         if (result.productRef) affectedProductIds.add(result.productRef.toString());
+      }
+      if (item.isCombo && item.productId) affectedProductIds.add(item.productId.toString());
+    }
+
+    // 7. If COD, commit immediately.
+    if (paymentMethod === 'cod') {
+      for (const item of order.items) {
+        const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
+        for (const sel of selections) {
+           await Inventory.findByIdAndUpdate(sel.inventoryId, {
+             $inc: { reservedStock: -item.quantity, onlineSold: item.quantity }
+           }, { session });
+        }
+      }
+      order.paymentStatus = 'cod_pending';
+      await order.save({ session });
+    }
+
+    await session.commitTransaction();
+    session.endSession();
+
+    // ── 8. POST-COMMIT GLOBAL SYNC ──
+    const updatedStocks = [];
+    for (const productId of affectedProductIds) {
+      const stock = await stockService.syncProductStockSummary(productId);
+      updatedStocks.push({ productId, ...stock });
+    }
+    const io = getIO();
+    io.emit('stock:updated', { updatedStocks, orderId: order._id });
+
+    // ── 9. CACHE INVALIDATION ──
+    clearDashboardCache();
 
     if (req.user) await Cart.findOneAndUpdate({ userId: req.user._id }, { items: [] });
 
@@ -162,8 +301,12 @@ exports.createOrder = async (req, res, next) => {
       }
     }
 
+    logAudit({ req, action: 'CREATE_ORDER', module: 'ORDERS', resourceId: order._id, details: { orderNumber: order.orderNumber, total: totalAmount } });
+
     return ApiResponse.created(res, { order: { _id: order._id, orderNumber: order.orderNumber, totalAmount }, razorpayOrder });
   } catch (error) { 
+    await session.abortTransaction();
+    session.endSession();
     if (error.name === 'ValidationError') {
       console.error('CRITICAL_ORDER_VAL_FAIL:', JSON.stringify(error.errors, null, 2));
     }
@@ -193,25 +336,15 @@ exports.verifyPayment = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-async function confirmStockSale(items, orderId) {
+async function confirmStockSale(items, orderId, session = null) {
   for (const item of items) {
-    // inventoryId is stored in order items
-    const updated = await Inventory.findByIdAndUpdate(item.inventoryId, {
-      $inc: {
-        onlineSold: item.quantity,
-        reservedStock: -item.quantity
+    if (item.isCombo && item.comboSelections?.length) {
+      for (const sel of item.comboSelections) {
+        await StockService.commitOnlineSale(sel.inventoryId, item.quantity, orderId, session);
       }
-    }, { new: true });
-    
-    // ─── LOW STOCK ALERT ───
-    const { checkAndAlertLowStock } = require('../utils/lowStockAlert');
-    checkAndAlertLowStock(updated).catch(() => {});
-
-    await StockMovement.create({
-      productId: item.productId, inventoryId: item.inventoryId,
-      variant: item.variant, type: 'sale_online', quantity: item.quantity,
-      reason: 'Online order sale', orderId,
-    });
+    } else {
+      await StockService.commitOnlineSale(item.inventoryId, item.quantity, orderId, session);
+    }
   }
 }
 
@@ -223,14 +356,17 @@ exports.cancelOrder = async (req, res, next) => {
     }
 
     for (const item of order.items) {
-      if (order.orderStatus === 'placed') {
-        // Was only reserved — free the reservation
-        await Inventory.findByIdAndUpdate(item.inventoryId, { $inc: { reservedStock: -item.quantity } });
-      } else if (order.orderStatus === 'confirmed') {
-        // Stock was already moved to onlineSold — only reverse the sale
-        await Inventory.findByIdAndUpdate(item.inventoryId, {
-          $inc: { onlineSold: -item.quantity }
-        });
+      const quantity = item.quantity;
+      const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
+
+      for (const target of selections) {
+        if (order.orderStatus === 'placed' || order.paymentStatus === 'pending') {
+          // Stock is only reserved — release it
+          await StockService.releaseReservation(target.inventoryId, quantity, order._id);
+        } else if (order.paymentStatus === 'completed') {
+          // Stock was already committed to onlineSold — rollback it
+          await StockService.rollbackSale(target.inventoryId, quantity, 'online', 'Order Cancelled', req.user._id);
+        }
       }
     }
 
@@ -314,6 +450,19 @@ exports.updateOrderStatus = async (req, res, next) => {
     const order = await Order.findById(req.params.id);
     if (!order) return ApiResponse.notFound(res, 'Order not found');
 
+    // TASK 8: Order Status Backwards Prevention
+    const STATUS_RANK = {
+      'placed': 1, 'pending': 1,
+      'confirmed': 2, 'shipped': 3,
+      'delivered': 4, 'cancelled': 5, 'returned': 5
+    };
+    const currentRank = STATUS_RANK[order.orderStatus] || 0;
+    const newRank = STATUS_RANK[status] || 0;
+
+    if (newRank < currentRank) {
+      return ApiResponse.error(res, `Invalid transition: Cannot move status from ${order.orderStatus} back to ${status}`, 400);
+    }
+
     order.orderStatus = status;
     order.statusHistory.push({ status, updatedAt: new Date(), updatedBy: req.user._id, note });
     if (trackingNumber) order.trackingInfo = { carrier, trackingNumber, trackingUrl };
@@ -334,6 +483,8 @@ exports.updateOrderStatus = async (req, res, next) => {
     if (status === 'delivered') {
       sendOrderReceiptToCustomer(order.shippingAddress.phone, order, 'online').catch(e => logger.error('Order Receipt WhatsApp Error:', e));
     }
+
+    logAudit({ req, action: 'UPDATE_ORDER_STATUS', module: 'ORDERS', resourceId: order._id, details: { from: order.orderStatus, to: status, orderNumber: order.orderNumber } });
 
     return ApiResponse.success(res, { order }, 'Order status updated');
   } catch (error) { next(error); }
@@ -410,18 +561,24 @@ exports.updateReturnStatus = async (req, res, next) => {
 
       // Return stock to Inventory
       for (const item of order.items) {
-        // Only increment 'returned' count. 
-        // onlineSold remains as historical data, but 'returned' increases overall available pool.
-        await Inventory.findByIdAndUpdate(item.inventoryId, { $inc: { returned: item.quantity } });
-        await StockMovement.create({
-          productId: item.productId, inventoryId: item.inventoryId,
-          variant: item.variant, type: 'return_customer', quantity: item.quantity,
-          reason: adminNote || 'Customer Return Approved', orderId: order._id,
-        });
+        const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId, variant: item.variant }];
+        
+        for (const target of selections) {
+          // Only increment 'returned' count. 
+          // onlineSold remains as historical data, but 'returned' increases overall available pool.
+          await Inventory.findByIdAndUpdate(target.inventoryId, { $inc: { returned: item.quantity, availableStock: item.quantity } });
+          await StockMovement.create({
+            productId: item.productId, inventoryId: target.inventoryId,
+            variant: target.variant || item.variant, type: 'return_customer', quantity: item.quantity,
+            reason: adminNote || 'Customer Return Approved', orderId: order._id,
+          });
+        }
       }
     }
 
     await order.save();
+    logAudit({ req, action: 'UPDATE_RETURN_STATUS', module: 'ORDERS', resourceId: order._id, details: { status, orderNumber: order.orderNumber } });
+
     return ApiResponse.success(res, order, `Return ${status}`);
   } catch (error) { next(error); }
 };

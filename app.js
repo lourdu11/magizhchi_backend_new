@@ -1,6 +1,18 @@
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const Sentry = require("@sentry/node");
+const { nodeProfilingIntegration } = require("@sentry/profiling-node");
+
+// ─── Sentry Initialization ─────────────────────────────────────
+Sentry.init({
+  dsn: process.env.SENTRY_DSN || "https://placeholder@sentry.io/placeholder",
+  integrations: [
+    nodeProfilingIntegration(),
+  ],
+  tracesSampleRate: 1.0,
+  profilesSampleRate: 1.0,
+});
 
 // ─── Environment Validation (Fail-Fast) ────────────────────────
 const requiredEnvs = ['MONGODB_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'FRONTEND_URL'];
@@ -18,33 +30,13 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const cookieParser = require('cookie-parser');
 const compression = require('compression');
-// Lightweight NoSQL injection sanitizer (replaces express-mongo-sanitize)
-const mongoSanitize = (req, res, next) => {
-  const sanitize = (obj) => {
-    if (obj && typeof obj === 'object') {
-      Object.keys(obj).forEach(k => {
-        if (k.startsWith('$') || k.includes('.')) delete obj[k];
-        else sanitize(obj[k]);
-      });
-    }
-  };
-  sanitize(req.body);
-  sanitize(req.params);
-  next();
-};
-
 const app = express();
 app.set('trust proxy', 1);
 
 // ─── Middleware ────────────────────────────────────────────────
 app.use(compression()); // Enable Gzip/Brotli compression
 
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-rtb-fingerprint-id', 'request-id']
-}));
+// CORS configured once below after helmet — DO NOT add a second cors() call
 
 const errorHandler = require('./src/middlewares/errorHandler');
 const { defaultLimiter } = require('./src/middlewares/rateLimiter');
@@ -65,29 +57,8 @@ const bannerRoutes = require('./src/routes/banner.routes');
 const userRoutes = require('./src/routes/user.routes');
 const publicRoutes = require('./src/routes/public.routes');
 const publicController = require('./src/controllers/public.controller');
-const upload = require('./src/middlewares/upload.middleware');
-const { protect, isAdmin } = require('./src/middlewares/auth');
-
-// 🚀 SUPER-HIGH-PRIORITY DIAGNOSTIC
-app.get('/api/v1/health-v2', (req, res) => {
-  res.json({ status: 'online', msg: 'IF YOU SEE THIS, SERVER IS UPDATED', time: new Date().toISOString() });
-});
-
-// 🔍 DEBUG ALL REQUESTS TO SOLVE 204 MYSTERY
-app.use((req, res, next) => {
-  console.log(`[REQUEST] ${new Date().toISOString()} | Method: ${req.method} | URL: ${req.url}`);
-  if (req.method === 'OPTIONS') {
-    console.log(`[OPTIONS DETECTED] Forcing 200 OK...`);
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-rtb-fingerprint-id, request-id');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    res.header('X-Status-Forced-By', 'Antigravity-Fix');
-    return res.status(200).send();
-  }
-  next();
-});
-
+const { upload, validateMimeType, uploadToCloudinary } = require('./src/middlewares/upload.middleware');
+const { protect, isAdmin, isStaff } = require('./src/middlewares/auth');
 
 // ─── Security Middleware ───────────────────────────────────────
 app.use(helmet({
@@ -96,40 +67,83 @@ app.use(helmet({
       ...helmet.contentSecurityPolicy.getDefaultDirectives(),
       "frame-src": ["'self'", "https://*.razorpay.com", "https://razorpay.com", "https://*.google.com", "https://www.google.com"],
       "frame-ancestors": ["'self'", "https://*.razorpay.com", "https://razorpay.com"],
-      "script-src": ["'self'", "'unsafe-inline'", "https://checkout.razorpay.com", "https://*.razorpay.com", "https://*.google.com", "https://www.google.com", "https://*.gstatic.com"],
-      "img-src": ["'self'", "data:", "https://*.razorpay.com", "https://ik.imagekit.io", "https://res.cloudinary.com", "https://*.google.com"],
+      "script-src": ["'self'", "https://checkout.razorpay.com", "https://*.razorpay.com", "https://*.google.com", "https://www.google.com", "https://*.gstatic.com"],
+      "img-src": ["'self'", "https://*.razorpay.com", "https://ik.imagekit.io", "https://res.cloudinary.com", "https://*.google.com"],
       "connect-src": ["'self'", "https://*.razorpay.com", "https://magizhchi-backend-new-1.onrender.com", "https://magizhchi-backend-new.onrender.com", "https://ik.imagekit.io", "https://res.cloudinary.com"],
     },
   },
 }));
+// BUG #16 FIX: Single merged cors() config — supports all origins including FRONTEND_URL env var
 app.use(cors({
-  origin: [
-    'https://magizhchigarments.vercel.app',
-    /^https:\/\/magizhchigarments-.*\.vercel\.app$/,
-    'http://localhost:3000',
-    'http://localhost:5173'
-  ],
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'],
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-rtb-fingerprint-id', 'request-id'],
-  exposedHeaders: ['x-rtb-fingerprint-id', 'request-id'],
   optionsSuccessStatus: 200
 }));
-
-app.use(mongoSanitize); // Prevent NoSQL injection
 
 // ─── Body Parsing ─────────────────────────────────────────────
 // Raw body for Razorpay webhook signature verification
 app.use('/api/v1/payments/webhook', express.raw({ type: 'application/json' }));
+
+// Anti-CSRF Protection Middleware for Mutating API Routes
+const csrfProtection = (req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  
+  // Exclude webhooks and public routes from strict CSRF checks
+  if (req.originalUrl.includes('/webhook') || req.originalUrl.includes('/public')) return next();
+
+  // Validate Origin/Referer matches the configured frontend strictly
+  const origin = req.headers.origin || req.headers.referer;
+  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'];
+  
+  let isValidOrigin = false;
+  try {
+    if (origin) {
+      const originUrl = new URL(origin);
+      isValidOrigin = allowedOrigins.some(allowed => {
+        const allowedUrl = new URL(allowed);
+        return originUrl.hostname === allowedUrl.hostname && originUrl.port === allowedUrl.port;
+      });
+    }
+  } catch (e) {
+    isValidOrigin = false;
+  }
+  
+  if (!isValidOrigin) {
+    return res.status(403).json({ success: false, message: 'CSRF Token Validation Failed: Invalid or Spoofed Origin' });
+  }
+  next();
+};
+
+app.use(csrfProtection);
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
-app.use(compression());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
-  maxAge: '30d', // 1 month caching
-  etag: true,
-  lastModified: true
-}));
+
+// ─── Custom NoSQL Injection Sanitizer (Express 5.x Getter-Safe) ─────
+const sanitizeObjectInPlace = (obj) => {
+  if (obj === null || typeof obj !== 'object') return obj;
+  for (const key in obj) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      if (key.startsWith('$') || key.includes('.')) {
+        delete obj[key];
+      } else {
+        sanitizeObjectInPlace(obj[key]);
+      }
+    }
+  }
+  return obj;
+};
+
+const customMongoSanitize = (req, res, next) => {
+  if (req.body) sanitizeObjectInPlace(req.body);
+  if (req.query) sanitizeObjectInPlace(req.query);
+  if (req.params) sanitizeObjectInPlace(req.params);
+  next();
+};
+
+app.use(customMongoSanitize);
+// Removed stateful local `/uploads` serving (Files are on Cloudinary)
 
 // ─── Logging ──────────────────────────────────────────────────
 if (process.env.NODE_ENV !== 'test') {
@@ -169,7 +183,7 @@ const API = '/api/v1';
 
 
 // VIP Priority Routes (Procurement & Scanning)
-app.use(`${API}/admin/inventory`, protect, isAdmin, require('./src/routes/inventory.routes'));
+app.use(`${API}/admin/inventory`, protect, isStaff, require('./src/routes/inventory.routes'));
 
 app.use(`${API}/admin`, adminRoutes);
 
@@ -192,9 +206,14 @@ app.use(`${API}/users`, userRoutes);
 app.get(`${API}/health/procurement`, (req, res) => res.json({ status: 'active', routes: ['admin/purchases', 'admin/suppliers'] }));
 
 // ─── Utility Routes ───────────────────────────────────────────
-app.post(`${API}/upload`, protect, isAdmin, upload.single('image'), (req, res) => {
+app.post(`${API}/upload`, protect, isAdmin, upload.single('image'), validateMimeType, async (req, res) => {
   if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
-  res.json({ success: true, url: req.file.path });
+  try {
+    const result = await uploadToCloudinary(req.file.buffer, 'magizhchi/products');
+    res.json({ success: true, url: result.secure_url });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 // settings handled in admin routes
 
@@ -224,6 +243,9 @@ app.get('/api/v1/health-v2', (req, res) => {
 app.use((req, res) => {
   res.status(404).json({ success: false, message: `Route ${req.originalUrl} not found` });
 });
+
+// ─── Sentry Error Handler ──────────────────────────────────────
+Sentry.setupExpressErrorHandler(app);
 
 // ─── Global Error Handler ─────────────────────────────────────
 app.use(errorHandler);

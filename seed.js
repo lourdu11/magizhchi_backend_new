@@ -305,20 +305,48 @@ async function seed() {
   }
   console.log(`✅ Seeded ${created} products`);
 
-  // Seed admin user
-  const existingAdmin = await User.findOne({ email: 'admin@magizhchi.com' });
-  if (!existingAdmin) {
+  // Delete old default admin to completely clean it out
+  await User.deleteOne({ email: 'admin@magizhchi.com' });
+
+  // Seed Admin 1 (Xavier Britto)
+  const existingAdmin1 = await User.findOne({ email: 'xavierbritto16@gmail.com' });
+  if (!existingAdmin1) {
     await User.create({
-      name: 'Admin',
-      email: 'admin@magizhchi.com',
-      phone: '9999999999',
-      password: 'Admin@1234',
+      name: 'Xavier Britto',
+      email: 'xavierbritto16@gmail.com',
+      phone: '9344881275',
+      password: 'Lourdu@110706',
       role: 'admin',
       isVerified: true,
     });
-    console.log('✅ Admin user created: admin@magizhchi.com / Admin@1234');
+    console.log('✅ Admin 1 created: xavierbritto16@gmail.com / Lourdu@110706');
   } else {
-    console.log('ℹ️  Admin user already exists');
+    // Make sure credentials / phone match perfectly
+    existingAdmin1.phone = '9344881275';
+    existingAdmin1.password = 'Lourdu@110706';
+    existingAdmin1.role = 'admin';
+    await existingAdmin1.save();
+    console.log('✅ Admin 1 updated/synced successfully');
+  }
+
+  // Seed Admin 2 (Magizhchi Garments Thanjavur)
+  const existingAdmin2 = await User.findOne({ email: 'magizhchigarmentsthanjavur@gmail.com' });
+  if (!existingAdmin2) {
+    await User.create({
+      name: 'Magizhchi Garments Thanjavur',
+      email: 'magizhchigarmentsthanjavur@gmail.com',
+      phone: '7358885452',
+      password: '12345678',
+      role: 'admin',
+      isVerified: true,
+    });
+    console.log('✅ Admin 2 created: magizhchigarmentsthanjavur@gmail.com / 12345678');
+  } else {
+    existingAdmin2.phone = '7358885452';
+    existingAdmin2.password = '12345678';
+    existingAdmin2.role = 'admin';
+    await existingAdmin2.save();
+    console.log('✅ Admin 2 updated/synced successfully');
   }
 
   // Seed staff user
@@ -342,7 +370,7 @@ async function seed() {
     await Settings.create({
       storeName: 'Magizhchi Garments',
       storeEmail: 'info@magizhchigarments.com',
-      storePhone: '+91 99999 99999',
+      storePhone: '+91 93448 81275',
       storeAddress: {
         line1: '123 Gandhi Nagar',
         city: 'Tirunelveli',
@@ -351,7 +379,7 @@ async function seed() {
       },
       gstNumber: '33XXXXX0000X1Z5',
       shipping: { flatRate: 50, freeAbove: 999 },
-      whatsappNumber: '919999999999',
+      whatsappNumber: '919344881275',
     });
     console.log('✅ Global settings seeded');
   } catch (e) {
@@ -360,12 +388,14 @@ async function seed() {
 
 
   console.log('\n🎉 Database seed complete!\n');
-  console.log('─────────────────────────────────────');
-  console.log('Admin Login  : admin@magizhchi.com');
-  console.log('Password     : Admin@1234');
+  console.log('────────────────────────────────────────────────────────────────────────');
+  console.log('Admin 1 Login: xavierbritto16@gmail.com OR 9344881275');
+  console.log('Password     : Lourdu@110706');
+  console.log('Admin 2 Login: magizhchigarmentsthanjavur@gmail.com OR 7358885452');
+  console.log('Password     : 12345678');
   console.log('Staff Login  : staff@magizhchi.com');
   console.log('Password     : Staff@1234');
-  console.log('─────────────────────────────────────\n');
+  console.log('────────────────────────────────────────────────────────────────────────\n');
 
   process.exit(0);
 }

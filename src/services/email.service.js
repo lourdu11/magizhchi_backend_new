@@ -18,6 +18,37 @@ const dispatchEmail = async (mailOptions) => {
   delete mailOptions.bcc;
 
   try {
+    const Settings = require('../models/Settings');
+    const settings = await Settings.findOne().select('+notifications.email.password');
+    
+    if (settings?.notifications?.email?.host && settings?.notifications?.email?.user && settings?.notifications?.email?.password) {
+      const nodemailer = require('nodemailer');
+      const transporter = nodemailer.createTransport({
+        host: settings.notifications.email.host,
+        port: settings.notifications.email.port || 587,
+        secure: settings.notifications.email.port === 465,
+        auth: {
+          user: settings.notifications.email.user,
+          pass: settings.notifications.email.password
+        }
+      });
+      
+      logger.info(`📧 [${execId}] Dispatching via DB-Custom SMTP (${settings.notifications.email.host}) → TO: ${mailOptions.to}`);
+      
+      const fromField = mailOptions.from || `"${settings.store?.name || 'Magizhchi Garments'}" <${settings.notifications.email.user}>`;
+      
+      const result = await transporter.sendMail({
+        from: fromField,
+        to: mailOptions.to,
+        subject: mailOptions.subject,
+        text: mailOptions.text,
+        html: mailOptions.html
+      });
+      
+      logger.info(`✅ [${execId}] DB-Custom SMTP Dispatch Success! MessageId: ${result.messageId}`);
+      return { success: true, message: 'Delivered via dynamic SMTP', messageId: result.messageId };
+    }
+
     const { sendBrevoApi } = require('../utils/brevoApi');
     
     logger.info(`📧 [${execId}] Dispatching via Global Gatekeeper → TO: ${mailOptions.to} | SUBJECT: ${mailOptions.subject}`);

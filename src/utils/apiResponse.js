@@ -16,11 +16,13 @@ class ApiResponse {
   }
 
   static paginated(res, data, pagination, message = 'Success') {
+    const { stats, ...paginationInfo } = pagination;
     return res.status(200).json({
       success: true,
       message,
       data,
-      pagination,
+      pagination: paginationInfo,
+      stats: stats || {}
     });
   }
 

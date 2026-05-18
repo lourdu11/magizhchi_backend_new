@@ -28,7 +28,10 @@ exports.handleWebhook = async (req, res) => {
       .update(rawBody)
       .digest('hex');
 
-    if (signature !== expectedSignature) {
+    const signatureBuffer = Buffer.from(signature || '', 'utf8');
+    const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
+
+    if (signatureBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) {
       logger.warn('⚠️ Webhook Error: Invalid signature received.');
       return res.status(400).json({ status: 'error', message: 'Invalid signature' });
     }
@@ -81,19 +84,41 @@ exports.handleWebhook = async (req, res) => {
         order.orderStatus = 'confirmed';
         order.statusHistory.push({ status: 'confirmed', updatedAt: new Date(), note: 'Payment captured via Webhook' });
         
-        // Confirm Stock Sale (move from reserved to onlineSold)
-        await confirmStockSale(order.items, order._id);
+        // Confirm Stock Sale via Hardened StockService
+        const StockService = require('../services/stock.service');
+        for (const item of order.items) {
+           await StockService.commitOnlineSale(item.inventoryId, item.quantity, order._id);
+        }
       }
 
       await order.save();
       logger.info(`✅ Webhook: Order ${order.orderNumber} successfully updated to PAID.`);
 
-      // Send Notifications (wrapped in try/catch to ensure 200 is still sent to Razorpay)
+      // Send Notifications
       try {
         sendOrderConfirmationEmail(order).catch(e => logger.error('Webhook Email Error:', e));
         sendOrderNotificationToAdmin(order).catch(e => logger.error('Webhook WhatsApp Error:', e));
       } catch (notifErr) {
         logger.error('Webhook Notification Trigger Error:', notifErr);
+      }
+    }
+
+    // 🛡️ NEW: Handle Payment Failure (Phase 2 Hardening)
+    if (event === 'payment.failed') {
+      const paymentEntity = payload.payment.entity;
+      const razorpayOrderId = paymentEntity.order_id;
+      
+      const order = await Order.findOne({ 'paymentDetails.razorpayOrderId': razorpayOrderId });
+      if (order && order.paymentStatus === 'pending') {
+         logger.warn(`🛑 Webhook: Payment failed for Order ${order.orderNumber}. Rolling back stock.`);
+         const StockService = require('../services/stock.service');
+         await StockService.paymentFailureRollback(order._id);
+         
+         order.paymentStatus = 'failed';
+         order.orderStatus = 'cancelled';
+         order.cancelReason = 'Payment Failed (Webhook)';
+         order.statusHistory.push({ status: 'cancelled', updatedAt: new Date(), note: 'Payment failed at gateway.' });
+         await order.save();
       }
     }
 
@@ -104,30 +129,3 @@ exports.handleWebhook = async (req, res) => {
     res.status(500).json({ status: 'error', message: error.message });
   }
 };
-
-/**
- * Re-uses the stock confirmation logic from order controller
- */
-async function confirmStockSale(items, orderId) {
-  for (const item of items) {
-    try {
-      const updated = await Inventory.findByIdAndUpdate(item.inventoryId, {
-        $inc: {
-          onlineSold: item.quantity,
-          reservedStock: -item.quantity
-        }
-      }, { new: true });
-      
-      const { checkAndAlertLowStock } = require('../utils/lowStockAlert');
-      checkAndAlertLowStock(updated).catch(() => {});
-
-      await StockMovement.create({
-        productId: item.productId, inventoryId: item.inventoryId,
-        variant: item.variant, type: 'sale_online', quantity: item.quantity,
-        reason: 'Online order sale (Webhook Verified)', orderId,
-      });
-    } catch (err) {
-      logger.error(`Failed to confirm stock for item in order ${orderId}:`, err);
-    }
-  }
-}

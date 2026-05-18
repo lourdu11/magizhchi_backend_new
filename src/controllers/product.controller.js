@@ -2,161 +2,134 @@ const Product = require('../models/Product');
 const Category = require('../models/Category');
 const StockMovement = require('../models/StockMovement');
 const ApiResponse = require('../utils/apiResponse');
+const stockService = require('../services/stockService');
 const slugify = require('slugify');
-const { generateSKU } = require('../utils/generateNumbers');
-const { sendProductNotificationToAdmin } = require('../services/whatsapp.service');
+const { generateSKU, generatePurchaseNumber } = require('../utils/generateNumbers');
+const { deleteFile } = require('../utils/fileHelper');
+const Purchase = require('../models/Purchase');
+const mongoose = require('mongoose');
 
-// GET /products
+const logger = require('../utils/logger');
+const SyncService = require('../services/sync.service');
+const Inventory = require('../models/Inventory');
+
+// GET /products (Public/POS)
 exports.getProducts = async (req, res, next) => {
   try {
-    const {
-      page = 1, limit = 20, category, search, minPrice, maxPrice, size,
-      sort = '-createdAt', isFeatured, isBestSeller, isNewArrival,
-      isPOS,
-    } = req.query;
+    const { lastId, limit = 20, category, search, minPrice, maxPrice, size, sort = '-createdAt', isFeatured, isBestSeller, isNewArrival, isPOS, isAdmin, showDeleted } = req.query;
 
-    console.log('DEBUG [getProducts]:', { category, size, isPOS, minPrice, maxPrice });
+    const query = { isActive: { $ne: false }, isDeleted: { $ne: true } };
 
-    const skip = (Number(page) - 1) * Number(limit);
-    const limitNum = Number(limit);
+    if (showDeleted === 'true') {
+       delete query.isDeleted;
+       query.isDeleted = true;
+    }
 
-    const Inventory = require('../models/Inventory');
-    const mongoose = require('mongoose');
-
-    // ─── 1. Build Inventory Match ────────────────────────────
-    const invMatch = {};
-    if (isPOS === 'true') {
-      invMatch.offlineEnabled = true;
+    if (isAdmin === 'true') {
+       delete query.isActive; 
+    } else if (isPOS === 'true') {
+       query.isBillingProduct = true;
     } else {
-      invMatch.onlineEnabled = true;
+       query.isOnlineProduct = true;
+       query.isActive = true;
     }
 
-    if (category && !search) {
-      // If it's a valid ID, match it directly. Otherwise, we'll filter by slug later in the pipeline
-      if (mongoose.Types.ObjectId.isValid(category)) {
-        invMatch.category = category;
-      }
+    if (category) {
+       if (mongoose.Types.ObjectId.isValid(category)) {
+          query.category = category;
+       } else {
+          const cat = await Category.findOne({ slug: category });
+          if (cat) query.category = cat._id;
+       }
     }
 
-    // Size filter (from comma separated string)
+    if (search) {
+       query.$or = [
+          { name: { $regex: search, $options: 'i' } },
+          { sku: { $regex: search, $options: 'i' } },
+          { description: { $regex: search, $options: 'i' } }
+       ];
+    }
+
+    if (minPrice || maxPrice) {
+       query.sellingPrice = {};
+       if (minPrice) query.sellingPrice.$gte = Number(minPrice);
+       if (maxPrice) query.sellingPrice.$lte = Number(maxPrice);
+    }
+
+    if (isFeatured === 'true') query.isFeatured = true;
+    if (isBestSeller === 'true') query.isBestSeller = true;
+    if (isNewArrival === 'true') query.isNewArrival = true;
+
     if (size) {
-      const sizeArray = size.split(',').filter(Boolean);
-      if (sizeArray.length > 0) {
-        invMatch.size = { $in: sizeArray };
-      }
+       const sizeArray = size.split(',').filter(Boolean);
+       if (sizeArray.length > 0) query['variants.size'] = { $in: sizeArray };
     }
 
-    // ─── 2. Aggregation Pipeline ──────────────────────────────
-    const pipeline = [
-      { $match: invMatch },
-      // Group by product (linked by productRef or productName)
-      { $group: {
-          _id: { $ifNull: ['$productRef', '$productName'] },
-          name: { $first: '$productName' },
-          categoryName: { $first: '$category' },
-          productRef: { $first: '$productRef' },
-          variants: { $push: {
-            size: '$size',
-            color: '$color',
-            // Calculate LIVE stock to avoid stale availableStock field
-            stock: { $max: [0, { $subtract: [
-               { $add: [{ $ifNull: ['$totalStock', 0] }, { $ifNull: ['$returned', 0] }] },
-               { $add: [{ $ifNull: ['$onlineSold', 0] }, { $ifNull: ['$offlineSold', 0] }, { $ifNull: ['$reservedStock', 0] }, { $ifNull: ['$damaged', 0] }] }
-            ]}] },
-            price: '$sellingPrice',
-            sku: '$sku',
-            barcode: '$barcode'
-          }},
-          images: { $first: '$images' },
-          sellingPrice: { $max: '$sellingPrice' },
-          createdAt: { $max: '$createdAt' }
-      }},
-      // Join Product details if linked
-      { $lookup: {
-          from: 'products',
-          localField: 'productRef',
-          foreignField: '_id',
-          as: 'productDetails'
-      }},
-      { $unwind: { path: '$productDetails', preserveNullAndEmptyArrays: true } },
-      // Merge Product details into root
-      { $addFields: {
-          name: { $ifNull: ['$productDetails.name', '$name'] },
-          sku: { $ifNull: ['$productDetails.sku', { $arrayElemAt: ['$variants.sku', 0] }] },
-          slug: '$productDetails.slug',
-          isActive: { $ifNull: ['$productDetails.isActive', true] },
-          images: { $ifNull: ['$productDetails.images', '$images'] },
-          category: { $ifNull: ['$productDetails.category', '$categoryName'] },
-          availableStock: { $sum: '$variants.stock' }
-      }},
-      // Join Category details if category is just a string/name (to get slug/details)
-      { $lookup: {
-          from: 'categories',
-          let: { catId: '$category' },
-          pipeline: [
-            { $match: { $expr: { $or: [{ $eq: ['$_id', '$$catId'] }, { $eq: ['$name', '$$catId'] }] } } }
-          ],
-          as: 'categoryDetails'
-      }},
-      { $unwind: { path: '$categoryDetails', preserveNullAndEmptyArrays: true } },
-      { $addFields: { categorySlug: '$categoryDetails.slug' } },
+    if (lastId) {
+       query._id = { $lt: lastId };
+    }
 
-      // ─── CRITICAL LOGIC FIX ───
-      // Final Match for Price, Size, Category Slug, Profile existence, and Advanced Search
-      { $match: {
-          ...(isPOS === 'true' ? {} : { productRef: { $ne: null }, isActive: true }),
-          ...(minPrice ? { sellingPrice: { $gte: Number(minPrice) } } : {}),
-          ...(maxPrice ? { sellingPrice: { ...((minPrice ? { $gte: Number(minPrice) } : {})), $lte: Number(maxPrice) } } : {}),
-          ...(category && !mongoose.Types.ObjectId.isValid(category) ? { categorySlug: category } : {}),
-          ...(isFeatured === 'true' ? { 'productDetails.isFeatured': true } : {}),
-          ...(isBestSeller === 'true' ? { 'productDetails.isBestSeller': true } : {}),
-          ...(isNewArrival === 'true' ? { 'productDetails.isNewArrival': true } : {}),
-          ...(isPOS === 'true' ? { availableStock: { $gt: 0 } } : {}),
-          
-          // Advanced Search (High Level)
-          ...(search ? {
-            $or: [
-              { name: new RegExp(search, 'i') },
-              { 'productDetails.description': new RegExp(search, 'i') },
-              { category: new RegExp(search, 'i') },
-              { categorySlug: new RegExp(search, 'i') },
-              { sku: new RegExp(search, 'i') },
-              { barcode: new RegExp(search, 'i') },
-              // If search is a number, match price exactly or near
-              ...(!isNaN(search) ? [{ sellingPrice: { $gte: Number(search) - 50, $lte: Number(search) + 50 } }] : [])
-            ]
-          } : {})
-      }},
-      
-      // Sorting
-      { $sort: sort === 'price-asc' ? { sellingPrice: 1 } : sort === 'price-desc' ? { sellingPrice: -1 } : { createdAt: -1 } },
-      // Pagination
-      { $facet: {
-          metadata: [ { $count: 'total' } ],
-          data: [ { $skip: skip }, { $limit: limitNum } ]
-      }}
-    ];
+    const products = await Product.find(query)
+       .populate('category', 'name slug')
+       .sort({ createdAt: -1, _id: -1 })
+       .limit(Number(limit) + 1)
+       .lean();
 
-    const [results] = await Inventory.aggregate(pipeline);
-    
-    const total = results.metadata[0]?.total || 0;
-    const products = results.data;
+    const hasMore = products.length > Number(limit);
+    const data = hasMore ? products.slice(0, -1) : products;
+    const nextCursor = hasMore ? data[data.length - 1]._id : null;
 
-    // Cache for 1 hour (3600s), allow stale for 1 day (86400s)
-    res.set('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
+    // 🚀 ULTRA PERFORMANCE: Batch-fetch ALL inventory for this page in ONE query
+    // instead of per-product SyncService calls (eliminates N+1 query problem)
+    const productIds = data.map(p => p._id);
+    const inventoryRecords = await Inventory.find({
+      productRef: { $in: productIds },
+      isDeleted: { $ne: true }
+    }).lean();
 
-    return ApiResponse.paginated(res, products, {
-      page: Number(page), limit: Number(limit),
-      total, pages: Math.ceil(total / Number(limit)),
+    // Build a quick lookup map: productId -> [inventoryItems]
+    const inventoryMap = inventoryRecords.reduce((acc, inv) => {
+      const key = String(inv.productRef);
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(inv);
+      return acc;
+    }, {});
+
+    const processedData = data.map(p => {
+      const invItems = inventoryMap[String(p._id)] || [];
+      // Calculate available stock from inventory records (same formula as SyncService)
+      let availableStock = 0;
+      const variants = invItems.map(inv => {
+        const avail = Math.max(0, (inv.totalStock + (inv.returned || 0)) -
+          (inv.onlineSold + inv.offlineSold + (inv.reservedStock || 0) + (inv.damaged || 0)));
+        availableStock += avail;
+        return { ...inv, availableStock: avail, size: inv.size, color: inv.color, sku: inv.sku, sellingPrice: inv.sellingPrice };
+      });
+      // Fallback to product-level stock if no inventory linked
+      const finalStock = invItems.length > 0 ? availableStock : (p.availableStock || 0);
+      return {
+        ...p,
+        variants: variants.length > 0 ? variants : (p.variants || []),
+        availableStock: finalStock,
+        syncedVariants: variants
+      };
     });
+
+    return ApiResponse.success(res, {
+       data: processedData,
+       nextCursor,
+       hasMore
+    });
+
   } catch (error) { next(error); }
 };
 
-// GET /products/admin (Admin - No changes needed to query logic, but adding inventory merge)
+// GET /products/admin (Admin Profile Center)
 exports.getAdminProducts = async (req, res, next) => {
   try {
-    const { category, search, sort = 'newest', page = 1, limit = 100 } = req.query;
-    const query = {};
+    const { lastId, category, search, sort = 'newest', limit = 100, showDeleted } = req.query;
+    const query = { isDeleted: showDeleted === 'true' ? true : { $ne: true } };
 
     if (category) query.category = category;
     if (search) {
@@ -166,228 +139,242 @@ exports.getAdminProducts = async (req, res, next) => {
       ];
     }
 
-    const sortMap = {
-      'newest': { createdAt: -1 },
-      'oldest': { createdAt: 1 },
-      'price-high': { sellingPrice: -1 },
-      'price-low': { sellingPrice: 1 },
-    };
-
-    const skip = (Number(page) - 1) * Number(limit);
+    if (lastId) {
+      query._id = { $lt: lastId };
+    }
 
     const products = await Product.find(query)
       .populate('category', 'name slug')
-      .sort(sortMap[sort] || { createdAt: -1 })
-      .skip(skip)
-      .limit(Number(limit))
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(Number(limit) + 1)
       .select('-__v')
       .lean();
 
-    const total = await Product.countDocuments(query);
+    const hasMore = products.length > Number(limit);
+    const data = hasMore ? products.slice(0, -1) : products;
+    const nextCursor = hasMore ? data[data.length - 1]._id : null;
 
-    // ─── INJECT AGGREGATED INVENTORY ───
-    const productIds = products.map(p => p._id);
-    const Inventory = require('../models/Inventory');
-    // Only count ACTIVE (non-archived) inventory variants
-    const allInventory = await Inventory.find({ 
-      productRef: { $in: productIds },
+    // 🚀 ULTRA PERFORMANCE: Batch-fetch ALL inventory for this page in ONE query
+    // Eliminates the N+1 problem: was (N * SyncService.calculateTrueStock) = N DB calls
+    const pageProductIds = data.map(p => p._id);
+    const pageInventoryRecords = await Inventory.find({
+      $or: [
+        { productRef: { $in: pageProductIds } },
+        { productName: { $in: data.map(p => p.name) }, productRef: null }
+      ],
       isDeleted: { $ne: true }
-    }).lean({ virtuals: true });
+    }).lean();
 
-    const inventoryMap = allInventory.reduce((acc, item) => {
-      const pId = item.productRef.toString();
-      if (!acc[pId]) acc[pId] = { totalStock: 0, sizes: new Set(), colors: new Set(), variantCount: 0 };
-      
-      const avail = Math.max(0, (item.totalStock + (item.returned || 0)) - ((item.onlineSold || 0) + (item.offlineSold || 0) + (item.reservedStock || 0) + (item.damaged || 0)));
-      acc[pId].totalStock += avail;
-      if (item.size) acc[pId].sizes.add(item.size);
-      if (item.color) acc[pId].colors.add(item.color);
-      acc[pId].variantCount++;
+    // Build lookup map: productId -> [inventoryItems]
+    const invMap = pageInventoryRecords.reduce((acc, inv) => {
+      const key = inv.productRef ? String(inv.productRef) : `name:${inv.productName}`;
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(inv);
       return acc;
     }, {});
 
-    const processedProducts = products
-      .map(p => {
-        const inv = inventoryMap[p._id.toString()] || { totalStock: 0, sizes: new Set(), colors: new Set(), variantCount: 0 };
-        return {
-          ...p,
-          inventorySummary: {
-            totalStock: inv.totalStock,
-            sizes: Array.from(inv.sizes),
-            colors: Array.from(inv.colors),
-            variantCount: inv.variantCount
-          }
-        };
-      })
-      // KEY FIX: Exclude products with no active inventory variants from admin catalog
-      .filter(p => p.inventorySummary.variantCount > 0);
+    // Fire-and-forget orphan healing (non-blocking)
+    pageInventoryRecords
+      .filter(inv => !inv.productRef && inv.productName)
+      .forEach(inv => {
+        const matchingProduct = data.find(p => p.name === inv.productName);
+        if (matchingProduct) {
+          Inventory.updateOne({ _id: inv._id }, { $set: { productRef: matchingProduct._id } })
+            .catch(err => logger.warn(`[Healing] ${err.message}`));
+        }
+      });
 
-    return ApiResponse.paginated(res, processedProducts, {
-      page: Number(page), limit: Number(limit), total,
-      pages: Math.ceil(total / Number(limit))
+    const processedProducts = await Promise.all(data.map(async (p) => {
+      const byRef = invMap[String(p._id)] || [];
+      const byName = invMap[`name:${p.name}`] || [];
+      const invItems = [...byRef, ...byName];
+      
+      let liveStock;
+      if (p.productNature === 'combo') {
+        // Derive combo stock from component variants
+        liveStock = await stockService.getComboProductStock(p._id);
+      } else {
+        // Aggregate standalone stock from inventory collection
+        const totalStock = invItems.reduce((sum, inv) => sum + (inv.totalStock || 0), 0);
+        const availableStock = invItems.reduce((sum, inv) => {
+          const avail = Math.max(0, (inv.totalStock + (inv.returned || 0)) -
+            (inv.onlineSold + inv.offlineSold + (inv.reservedStock || 0) + (inv.damaged || 0)));
+          return sum + avail;
+        }, 0);
+        const reservedStock = invItems.reduce((sum, inv) => sum + (inv.reservedStock || 0), 0);
+        
+        liveStock = {
+          totalStock,
+          availableStock,
+          reservedStock,
+          variantCount: invItems.length
+        };
+      }
+
+      return {
+        ...p,
+        liveStock,
+        // Legacy support for older components
+        availableStock: liveStock.availableStock,
+        totalStock: liveStock.totalStock
+      };
+    }));
+
+    // Parallelize all count queries in ONE Promise.all (was 4 serial queries)
+    const statsQuery = { ...query };
+    delete statsQuery._id;
+    
+    const [onlineCount, billingCount, inventoryAgg, totalProfileCount] = await Promise.all([
+       Product.countDocuments({ ...statsQuery, isOnlineProduct: true }),
+       Product.countDocuments({ ...statsQuery, isBillingProduct: true }),
+       Inventory.aggregate([
+         { $match: { productRef: { $in: pageProductIds }, isDeleted: { $ne: true } } },
+         { $group: { _id: null, totalStock: { $sum: '$totalStock' } } }
+       ]),
+       Product.countDocuments(statsQuery)
+    ]);
+
+    return ApiResponse.success(res, {
+      data: processedProducts,
+      nextCursor,
+      hasMore,
+      stats: {
+         onlineEnabled: onlineCount,
+         billingEnabled: billingCount,
+         procuredStock: inventoryAgg[0]?.totalStock || 0,
+         totalProfiles: totalProfileCount
+      }
     });
 
   } catch (error) { next(error); }
 };
 
-// GET /products/admin/:id (Admin)
+// GET /products/admin/:id
 exports.getAdminProductById = async (req, res, next) => {
   try {
-    const product = await Product.findById(req.params.id).populate('category', 'name slug').lean();
+    const product = await Product.findOne({ _id: req.params.id, isDeleted: { $ne: true } }).populate('category', 'name slug').lean();
     if (!product) return ApiResponse.notFound(res, 'Product not found');
+    
+    // Resolve live stock and sync variants
+    const SyncService = require('../services/sync.service');
+    const trueStock = await SyncService.calculateTrueStock(product);
+    product.variants = trueStock.variants;
+    product.availableStock = trueStock.availableStock;
+    product.totalStock = trueStock.totalStock;
+
     return ApiResponse.success(res, { product });
   } catch (error) { next(error); }
 };
 
-// GET /products/:slug
+// GET /products/:slug (Public Detail)
 exports.getProduct = async (req, res, next) => {
   try {
     const { slug } = req.params;
-    if (!slug || slug === 'undefined' || slug === 'null') {
-      return ApiResponse.notFound(res, 'Product identifier missing');
-    }
     const { isPOS } = req.query;
-    const Inventory = require('../models/Inventory');
 
-    let product = null;
-    let variants = [];
-    let isVirtual = false;
-
-    // 1. Try finding by Slug first (Standard Product)
-    const pQuery = { slug };
-    if (isPOS !== 'true') pQuery.isActive = true;
-    product = await Product.findOne(pQuery).populate('category', 'name slug').select('-costPrice -__v').lean({ virtuals: true });
-
-    if (!product) {
-      // 2. Try finding by Barcode in Inventory (Crucial for POS Scanning)
-      const invByBarcode = await Inventory.findOne({ 
-        barcode: slug,
-        ...(isPOS === 'true' ? { offlineEnabled: true } : { onlineEnabled: true })
-      }).lean();
-
-      if (invByBarcode) {
-        // Find all siblings (other sizes/colors) of this virtual product
-        const siblings = await Inventory.find({
-          productName: invByBarcode.productName,
-          productRef: null,
-          ...(isPOS === 'true' ? { offlineEnabled: true } : { onlineEnabled: true })
-        }).lean();
-
-        isVirtual = true;
-        product = {
-          _id: `unlinked-${invByBarcode.productName}`,
-          name: invByBarcode.productName,
-          category: { name: invByBarcode.category || 'Uncategorized' },
-          sellingPrice: invByBarcode.sellingPrice,
-          images: invByBarcode.images || [],
-          isVirtual: true,
-          isActive: true
-        };
-        variants = siblings;
-      } else {
-        // 3. Try finding by productName directly in unlinked inventory
-        const unlinkedItems = await Inventory.find({
-          productName: slug,
-          productRef: null,
-          ...(isPOS === 'true' ? { offlineEnabled: true } : { onlineEnabled: true })
-        }).lean();
-
-        if (unlinkedItems.length > 0) {
-          isVirtual = true;
-          product = {
-            _id: `unlinked-${unlinkedItems[0].productName}`,
-            name: unlinkedItems[0].productName,
-            category: { name: unlinkedItems[0].category || 'Uncategorized' },
-            sellingPrice: unlinkedItems[0].sellingPrice,
-            images: unlinkedItems[0].images || [],
-            isVirtual: true,
-            isActive: true
-          };
-          variants = unlinkedItems;
-        }
-      }
+    const query = { isDeleted: { $ne: true } };
+    
+    if (mongoose.Types.ObjectId.isValid(slug)) {
+      query._id = slug;
+    } else {
+      query.slug = slug;
     }
 
+    if (isPOS !== 'true') query.isActive = true;
+
+    const product = await Product.findOne(query)
+      .populate('category', 'name slug')
+      .lean();
+      
     if (!product) return ApiResponse.notFound(res, 'Product not found');
 
-    // 4. Fetch Variants for standard product if not already set (Virtual case sets them)
-    if (!isVirtual) {
-      const liveItems = await Inventory.find({ 
-        $or: [
-          { productRef: product._id },
-          { productName: { $regex: new RegExp('^' + product.name.trim() + '$', 'i') } }
-        ],
-        ...(isPOS === 'true' ? { offlineEnabled: true } : { onlineEnabled: true })
-      }).lean();
-      variants = liveItems;
+    // Add view count
+    if (isPOS !== 'true') {
+       await Product.findByIdAndUpdate(product._id, { $inc: { viewCount: 1 } }).exec();
     }
 
-    // 5. Format Output
-    const formattedVariants = variants.map(inv => {
-      const stock = Math.max(0, (inv.totalStock || 0) + (inv.returned || 0) - (inv.onlineSold || 0) - (inv.offlineSold || 0) - (inv.reservedStock || 0) - (inv.damaged || 0));
-      return {
-        size:     inv.size,
-        color:    inv.color,
-        stock:    stock,
-        price:    inv.sellingPrice || product.sellingPrice,
-        sku:      inv.sku || product.sku,
-        barcode:  inv.barcode,
-        _id:      inv._id,
-      };
-    });
+    // Resolve live stock
+    const SyncService = require('../services/sync.service');
+    const trueStock = await SyncService.calculateTrueStock(product);
+    product.variants = trueStock.variants;
+    product.availableStock = trueStock.availableStock;
+    product.totalStock = trueStock.totalStock;
 
-    const productObj = product.toObject ? product.toObject() : product;
-    productObj.variants = formattedVariants;
-    productObj.availableStock = formattedVariants.reduce((sum, v) => sum + v.stock, 0);
-
-    if (!isVirtual) {
-      Product.findByIdAndUpdate(product._id, { $inc: { viewCount: 1 } }).exec();
-    }
-    
-    // Cache for 1 hour
-    res.set('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
-    
-    return ApiResponse.success(res, { product: productObj });
+    return ApiResponse.success(res, { product });
   } catch (error) { next(error); }
 };
 
 // GET /products/search
 exports.searchProducts = async (req, res, next) => {
   try {
-    const { q, limit = 8 } = req.query;
+    const { q, limit = 8, isPOS } = req.query;
     if (!q || q.length < 2) return ApiResponse.success(res, { products: [] });
     
     const query = {
       $or: [
         { name: { $regex: q, $options: 'i' } },
-        { sku: { $regex: q, $options: 'i' } },
-        { tags: { $in: [new RegExp(q, 'i')] } },
+        { sku: { $regex: q, $options: 'i' } }
       ],
+      isDeleted: { $ne: true }
     };
 
-    if (req.query.isPOS !== 'true') {
-      query.isActive = true;
+    if (isPOS === 'true') {
+       query.isBillingProduct = true;
+    } else {
+       query.isOnlineProduct = true;
+       query.isActive = true;
     }
 
     const products = await Product.find(query)
-      .select('name sku slug images sellingPrice isActive')
+      .select('name sku slug images thumbnail sellingPrice discountedPrice isActive variants availableStock category')
+      .populate('category', 'name')
+      .limit(Number(limit))
       .lean();
 
-    // For search results, we can just return the display profiles
-    // The frontend usually navigates to details where we fetch live stock
-    return ApiResponse.success(res, { products });
+    const SyncService = require('../services/sync.service');
+    const processedProducts = await Promise.all(products.map(async p => {
+       const trueStock = await SyncService.calculateTrueStock(p);
+       return {
+          ...p,
+          variants: trueStock.variants,
+          availableStock: trueStock.availableStock,
+          syncedVariants: trueStock.variants 
+       };
+    }));
+
+    return ApiResponse.success(res, { products: processedProducts });
   } catch (error) { next(error); }
 };
 
 // POST /products (Admin)
 exports.createProduct = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
     const data = req.body;
-    if (!data.name) return ApiResponse.error(res, 'Product name is required', 400);
+    if (data.variants && Array.isArray(data.variants)) {
+      data.variants = data.variants.map(v => {
+        if (v._id && String(v._id).startsWith('temp-')) {
+          const { _id, ...rest } = v;
+          return rest;
+        }
+        return v;
+      });
+    }
+    if (!data.name) {
+      await session.abortTransaction();
+      return ApiResponse.error(res, 'Product name is required', 400);
+    }
     
-    // 1. Generate unique slug
+    // Ensure default visibility if not provided
+    if (data.isOnlineProduct === undefined) data.isOnlineProduct = true;
+    if (data.isBillingProduct === undefined) data.isBillingProduct = true;
+    if (data.isInventoryProduct === undefined) data.isInventoryProduct = true;
+    if (data.isActive === undefined) data.isActive = true;
+
+    // Generate unique slug
     let slug = slugify(data.name, { lower: true, strict: true });
-    const slugExists = await Product.findOne({ slug });
+    const slugExists = await Product.findOne({ slug }).session(session);
     if (slugExists) {
       slug = `${slug}-${Math.random().toString(36).substring(2, 7)}`;
     }
@@ -395,98 +382,266 @@ exports.createProduct = async (req, res, next) => {
 
     if (!data.sku) data.sku = generateSKU(data.category);
 
-    const product = await Product.create(data);
-    
-    // 2. Link existing inventory items by name
-    const Inventory = require('../models/Inventory');
-    await Inventory.updateMany(
-      { productName: { $regex: new RegExp('^' + product.name.trim() + '$', 'i') } },
-      { productRef: product._id }
-    );
-    
-    // Notify Admin via WhatsApp
-    sendProductNotificationToAdmin(product, 'created').catch(() => {});
+    const product = await Product.create([data], { session });
+    const newProduct = product[0];
 
-    return ApiResponse.created(res, { product }, 'Product created successfully');
-  } catch (error) {
-    if (error.code === 11000) {
-      const field = Object.keys(error.keyPattern || {})[0] || 'unique field';
-      return ApiResponse.error(res, `A product with this ${field} already exists.`, 400);
+    // NEW: Trigger immediate inventory sync for initial variants if any
+    await SyncService.syncProfileToInventory(newProduct._id, data, session);
+
+    await session.commitTransaction();
+    return ApiResponse.created(res, newProduct, 'Product Profile Created Successfully');
+  } catch (error) { 
+    try {
+      if (session && session.inTransaction && session.inTransaction()) {
+        await session.abortTransaction();
+      }
+    } catch (abortErr) {
+      console.error('Failed to abort transaction in createProduct:', abortErr.message);
     }
-    next(error);
+    next(error); 
+  } finally {
+    session.endSession();
   }
 };
 
-// PUT /products/:id (Admin)
-exports.updateProduct = async (req, res, next) => {
+// POST /products/with-procurement (Admin)
+exports.createProductWithProcurement = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
-    const data = { ...req.body };
-    const product = await Product.findById(req.params.id);
-    if (!product) return ApiResponse.notFound(res, 'Product not found');
-
-    // 1. Unique checks for SKU
-    if (data.sku && data.sku !== product.sku) {
-      const skuExists = await Product.findOne({ sku: data.sku, _id: { $ne: product._id } });
-      if (skuExists) return ApiResponse.error(res, 'SKU already exists', 400);
+    const { productData, procurementData } = req.body;
+    if (productData && productData.variants && Array.isArray(productData.variants)) {
+      productData.variants = productData.variants.map(v => {
+        if (v._id && String(v._id).startsWith('temp-')) {
+          const { _id, ...rest } = v;
+          return rest;
+        }
+        return v;
+      });
+    }
+    
+    if (!productData.name) {
+       await session.abortTransaction();
+       return ApiResponse.error(res, 'Product name is required', 400);
     }
 
-    // 2. Slug Regeneration (if name changed)
-    if (data.name && data.name !== product.name) {
-      let slug = slugify(data.name, { lower: true, strict: true });
-      const slugExists = await Product.findOne({ slug, _id: { $ne: product._id } });
-      if (slugExists) {
-        slug = `${slug}-${Math.random().toString(36).substring(2, 7)}`;
-      }
-      product.slug = slug;
-      
-      // ERP Logic: Re-link inventory if name changes
-      const Inventory = require('../models/Inventory');
-      // 1. Unlink old ones
-      await Inventory.updateMany({ productRef: product._id }, { productRef: null });
-      // 2. Link new ones
-      await Inventory.updateMany(
-        { productName: { $regex: new RegExp('^' + data.name.trim() + '$', 'i') } },
-        { productRef: product._id }
-      );
+    // 1. Create Product Profile
+    // Generate unique slug
+    let slug = slugify(productData.name, { lower: true, strict: true });
+    const slugExists = await Product.findOne({ slug }).session(session);
+    if (slugExists) {
+      slug = `${slug}-${Math.random().toString(36).substring(2, 7)}`;
+    }
+    productData.slug = slug;
+    if (!productData.sku) productData.sku = generateSKU(productData.category);
+
+    const product = await Product.create([productData], { session });
+    const newProduct = product[0];
+
+    // 2. Create Purchase Bill if data exists
+    if (procurementData && procurementData.supplierId && procurementData.items?.length > 0) {
+       const subtotal = procurementData.items.reduce((sum, item) => sum + (item.quantity * item.costPrice), 0);
+       
+       const purchaseData = {
+          purchaseNumber: generatePurchaseNumber(),
+          billNumber: procurementData.billNumber,
+          supplierId: procurementData.supplierId,
+          billDate: procurementData.billDate || new Date(),
+          billImage: procurementData.billImage,
+          status: 'received',
+          paymentStatus: 'pending',
+          items: procurementData.items.map(item => ({
+             productId: item.productId || newProduct._id,
+             productName: item.productName || newProduct.name,
+             sku: item.sku || newProduct.sku,
+             size: item.size,
+             color: item.color,
+             quantity: item.quantity,
+             costPrice: item.costPrice,
+             sellingPrice: item.sellingPrice,
+             total: item.quantity * item.costPrice
+          })),
+          pricing: {
+             subtotal,
+             totalAmount: subtotal, // Assuming no GST for simplicity here, or use default
+             gstAmount: 0
+          },
+          performedBy: req.user._id
+       };
+
+       const purchase = await Purchase.create([purchaseData], { session });
+       const newPurchase = purchase[0];
+
+       // 3. Process Purchase (Sync to Inventory)
+       await SyncService.syncPurchaseToCatalog(newPurchase._id, req.user._id, session);
+    } else {
+       // NEW: If no procurement recorded, still sync profile to create empty inventory records
+       await SyncService.syncProfileToInventory(newProduct._id, productData, session);
     }
 
-    // 3. Manual Merge
-    const excludedFields = ['_id', 'id', 'slug', 'createdAt', 'updatedAt', '__v', 'totalStock', 'availableStock'];
-    Object.keys(data).forEach(key => {
-      if (!excludedFields.includes(key)) {
-        product[key] = data[key];
-      }
-    });
+    await session.commitTransaction();
+    return ApiResponse.created(res, newProduct, 'Product Profile and Procurement recorded successfully');
 
-    // 4. Save (triggers pre-save hooks for discountedPrice)
-    const updatedProduct = await product.save();
-
-    // 5. Notify Admin
-    sendProductNotificationToAdmin(updatedProduct, 'updated').catch(() => {});
-
-    return ApiResponse.success(res, { product: updatedProduct }, 'Product updated successfully');
   } catch (error) {
-    if (error.code === 11000) {
-      const field = Object.keys(error.keyPattern || {})[0] || 'unique field';
-      return ApiResponse.error(res, `A product with this ${field} already exists.`, 400);
+    try {
+      if (session && session.inTransaction && session.inTransaction()) {
+        await session.abortTransaction();
+      }
+    } catch (abortErr) {
+      console.error('Failed to abort transaction in createProductWithProcurement:', abortErr.message);
     }
     next(error);
+  } finally {
+    session.endSession();
+  }
+};
+
+// PATCH /products/:id (Admin)
+exports.updateProduct = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+    if (updateData.variants && Array.isArray(updateData.variants)) {
+      updateData.variants = updateData.variants.map(v => {
+        if (v._id && String(v._id).startsWith('temp-')) {
+          const { _id, ...rest } = v;
+          return rest;
+        }
+        return v;
+      });
+    }
+
+    const product = await Product.findById(id).session(session);
+    if (!product) {
+      await session.abortTransaction();
+      return ApiResponse.notFound(res, 'Product not found');
+    }
+
+    Object.assign(product, updateData);
+    await product.save({ session });
+    
+    // Cascade changes to Inventory
+    await SyncService.syncProfileToInventory(id, updateData, session);
+
+    await session.commitTransaction();
+
+    try {
+      const { getIO } = require('../utils/socket');
+      const io = getIO();
+      if (io) {
+         io.emit('STOCK_UPDATED', { productId: id });
+      }
+    } catch (socketErr) {
+      console.warn('[SyncService] Socket emission failed:', socketErr.message);
+    }
+
+    return ApiResponse.success(res, product);
+  } catch (error) { 
+    try {
+      if (session && session.inTransaction && session.inTransaction()) {
+        await session.abortTransaction();
+      }
+    } catch (abortErr) {
+      console.error('Failed to abort transaction in updateProduct:', abortErr.message);
+    }
+    next(error); 
+  } finally {
+    session.endSession();
   }
 };
 
 // DELETE /products/:id (Admin)
 exports.deleteProduct = async (req, res, next) => {
   try {
-    const product = await Product.findByIdAndDelete(req.params.id);
-    if (!product) return ApiResponse.notFound(res, 'Product not found');
+    // ENTERPRISE SYNC: Protected archival with reference checking
+    const { id } = req.params;
+    const result = await SyncService.archiveProduct(id, req.user._id, req.body?.reason || 'Manual Admin Archival');
     
-    // Unlink inventory
-    const Inventory = require('../models/Inventory');
-    await Inventory.updateMany({ productRef: product._id }, { productRef: null });
-
-    return ApiResponse.success(res, null, 'Product deleted permanently');
+    return ApiResponse.success(res, { 
+       archived: true, 
+       mode: result.mode,
+       message: 'Product and variants archived with history protection' 
+    });
   } catch (error) { next(error); }
 };
 
-// adjustStock has been moved to inventory.controller.js
-// Use PUT /api/v1/admin/inventory/:id/adjust instead
+exports.purgeProduct = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const result = await SyncService.purgeProduct(id, req.user._id);
+    return ApiResponse.success(res, result, result.message);
+  } catch (error) { next(error); }
+};
+
+exports.restoreProduct = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const product = await Product.findById(id);
+    if (!product) return ApiResponse.notFound(res, 'Product profile not found');
+
+    await Product.findByIdAndUpdate(id, { 
+      isActive: true, 
+      isDeleted: false,
+      deletedAt: null,
+      isOnlineProduct: true,
+      isBillingProduct: true,
+      isInventoryProduct: true
+    });
+
+    // Optionally restore variants that were archived
+    const Inventory = require('../models/Inventory');
+    await Inventory.updateMany(
+      { productRef: id, isDeleted: true }, 
+      { isDeleted: false, deletedAt: null }
+    );
+
+    return ApiResponse.success(res, { restored: true }, 'Product profile and variants restored successfully');
+  } catch (error) { next(error); }
+};
+
+// GET /pos/products/:productId/variants (IMPLEMENT FIX 5)
+exports.getPOSProductVariants = async (req, res, next) => {
+  try {
+    const { productId } = req.params;
+    let product = await Product.findById(productId).select('name productNature comboSlots sellingPrice discountedPrice images thumbnail');
+
+    if (!product) {
+      // 🛡️ HARDENING: Fallback to resolve master Product if given an Inventory ID
+      const Inventory = require('../models/Inventory');
+      const invRecord = await Inventory.findById(productId);
+      if (invRecord && invRecord.productRef) {
+        product = await Product.findById(invRecord.productRef).select('name productNature comboSlots sellingPrice discountedPrice images thumbnail');
+      }
+    }
+
+    if (!product) return ApiResponse.notFound(res, 'Product not found');
+
+    let variants;
+    if (product.productNature === 'combo') {
+      const { variantStockMap } = await stockService.getComboProductStock(productId);
+      variants = Object.values(variantStockMap);
+    } else {
+      const invRecords = await Inventory.find({ productRef: productId, isDeleted: { $ne: true } }).lean();
+      variants = invRecords.map(inv => {
+        const avail = Math.max(0, (inv.totalStock + (inv.returned || 0)) -
+          (inv.onlineSold + inv.offlineSold + (inv.reservedStock || 0) + (inv.damaged || 0)));
+        return {
+          ...inv,
+          sellingPrice: product.discountedPrice || inv.sellingPrice,
+          availableStock: avail,
+          inStock: avail > 0,
+          stockLabel: avail > 0 ? `${avail} IN STOCK` : 'OUT OF STOCK'
+        };
+      });
+    }
+
+    console.log('[getPOSProductVariants] Returning variants for POS:', variants?.length);
+    return ApiResponse.success(res, {
+      product,
+      variants
+    });
+  } catch (error) { next(error); }
+};
+

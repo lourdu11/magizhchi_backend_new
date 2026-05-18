@@ -7,10 +7,19 @@ const Settings = require('../models/Settings');
 const ApiResponse = require('../utils/apiResponse');
 const Inventory = require('../models/Inventory');
 const Purchase = require('../models/Purchase');
+const Supplier = require('../models/Supplier');
 
-// Cache disabled for real-time accuracy during development/rapid testing
+// Enterprise Cache System: Enabled for maximum platform stability and performance
 let dashboardCache = { data: null, lastUpdated: 0 };
-const CACHE_TTL = 0; // Set to 0 to force refresh every time
+const CACHE_TTL = 300000; // 5 Minutes cache for dashboard KPIs
+let analyticsCache = {}; 
+const ANALYTICS_TTL = 600000; // 10 Minutes for heavy analytics data
+
+// 🚀 CACHE BUSTING HELPER: Call this when billing/procurement activity happens
+exports.clearDashboardCache = () => {
+   dashboardCache = { data: null, lastUpdated: 0 };
+   analyticsCache = {};
+};
 
 const lowStockPipeline = [
   { $match: { isDeleted: { $ne: true }, $or: [{ onlineEnabled: true }, { offlineEnabled: true }] } },
@@ -28,6 +37,11 @@ const lowStockPipeline = [
 
 exports.getDashboardStats = async (req, res, next) => {
   try {
+    // 🚀 ULTRA PERFORMANCE: Serve from cache if fresh
+    if (CACHE_TTL > 0 && dashboardCache.data && (Date.now() - dashboardCache.lastUpdated < CACHE_TTL)) {
+      return ApiResponse.success(res, dashboardCache.data);
+    }
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const thisMonth = new Date(today.getFullYear(), today.getMonth(), 1);
@@ -38,18 +52,17 @@ exports.getDashboardStats = async (req, res, next) => {
       registeredUsers, uniqueGuests,
       lowStockInventory,
       supplierStats,
-      wastageStats
+      wastageStats,
+      recentOrders  // BUG #7 FIX: fetch recent orders for Transaction Pulse feed
     ] = await Promise.all([
-      // 1. Revenue & Cost Aggregation
+      // 1. Revenue & Cost Aggregation (Optimized via Snapshots)
       Order.aggregate([
         { $match: { orderStatus: { $nin: ['cancelled', 'returned'] } } },
         { $unwind: '$items' },
-        { $lookup: { from: 'inventories', localField: 'items.inventoryId', foreignField: '_id', as: 'inv' } },
-        { $unwind: '$inv' },
         { $group: {
             _id: null,
             todayRevenue: { $sum: { $cond: [{ $gte: ['$createdAt', today] }, '$items.total', 0] } },
-            todayCost: { $sum: { $cond: [{ $gte: ['$createdAt', today] }, { $multiply: ['$inv.purchasePrice', '$items.quantity'] }, 0] } },
+            todayCost: { $sum: { $cond: [{ $gte: ['$createdAt', today] }, { $multiply: [{ $ifNull: ['$items.purchasePrice', 0] }, '$items.quantity'] }, 0] } },
             monthRevenue: { $sum: { $cond: [{ $gte: ['$createdAt', thisMonth] }, '$items.total', 0] } },
         }},
         { $unionWith: {
@@ -57,12 +70,10 @@ exports.getDashboardStats = async (req, res, next) => {
             pipeline: [
               { $match: { status: { $ne: 'voided' } } },
               { $unwind: '$items' },
-              { $lookup: { from: 'inventories', localField: 'items.inventoryId', foreignField: '_id', as: 'inv' } },
-              { $unwind: '$inv' },
               { $group: {
                   _id: null,
                   todayRevenue: { $sum: { $cond: [{ $gte: ['$createdAt', today] }, '$items.total', 0] } },
-                  todayCost: { $sum: { $cond: [{ $gte: ['$createdAt', today] }, { $multiply: ['$inv.purchasePrice', '$items.quantity'] }, 0] } },
+                  todayCost: { $sum: { $cond: [{ $gte: ['$createdAt', today] }, { $multiply: [{ $ifNull: ['$items.purchasePrice', 0] }, '$items.quantity'] }, 0] } },
                   monthRevenue: { $sum: { $cond: [{ $gte: ['$createdAt', thisMonth] }, '$items.total', 0] } },
               }}
             ]
@@ -78,23 +89,71 @@ exports.getDashboardStats = async (req, res, next) => {
       Order.countDocuments({ orderStatus: 'delivered' }),
       User.countDocuments({ role: 'user' }),
       Order.distinct('shippingAddress.phone', { isGuestOrder: true }),
-      // 2. Low Stock Inventory (excludes archived + zero-stock variants)
-      Inventory.find({ 
-        isDeleted: { $ne: true },
-        $or: [{ onlineEnabled: true }, { offlineEnabled: true }],
-        availableStock: { $gt: 0 },
-        $expr: { $lte: ['$availableStock', '$lowStockThreshold'] } 
-      }).limit(10).lean(),
-      // 3. Supplier Payables & Partner Stats (Strictly Active Partners)
-      require('../models/Supplier').aggregate([
+      // 2. Low Stock Inventory — use aggregation so availableStock is always live
+      Inventory.aggregate([
+        { $match: { isDeleted: { $ne: true }, $or: [{ onlineEnabled: true }, { offlineEnabled: true }] } },
+        { $addFields: {
+            availableStock: { $max: [0, { $subtract: [
+              { $add: ['$totalStock', { $ifNull: ['$returned', 0] }] },
+              { $add: ['$onlineSold', '$offlineSold', { $ifNull: ['$reservedStock', 0] }, '$damaged'] }
+            ]}] }
+        }},
+        { $match: { availableStock: { $gt: 0 }, $expr: { $lte: ['$availableStock', { $ifNull: ['$lowStockThreshold', 5] }] } } },
+        { $sort: { availableStock: 1 } },
+        { $limit: 10 }
+      ]),
+      // 3. Supplier Payables & Partner Stats (Direct from Purchase Source of Truth)
+      Supplier.aggregate([
         { $match: { isDeleted: false, isActive: true } }, 
+        {
+          $lookup: {
+            from: 'purchases',
+            let: { supplier_id: '$_id' },
+            pipeline: [
+              { $match: { $expr: { $and: [ { $eq: ['$supplierId', '$$supplier_id'] }, { $ne: ['$isDeleted', true] } ] } } },
+              { $unwind: '$items' },
+              {
+                $lookup: {
+                  from: 'products',
+                  localField: 'items.productId',
+                  foreignField: '_id',
+                  as: 'pInfo'
+                }
+              },
+              { $match: { pInfo: { $ne: [] }, 'pInfo.0.isActive': true } },
+              { $group: {
+                  _id: '$_id',
+                  manualFinancialImpact: { $first: '$pricing.manualFinancialImpact' },
+                  totalAmount: { $first: '$pricing.totalAmount' }
+              }}
+            ],
+            as: 'validPurchases'
+          }
+        },
+        {
+          $addFields: {
+            supplierProcurement: { 
+              $add: [
+                { $ifNull: ['$openingBalance', 0] },
+                { $sum: {
+                    $map: {
+                      input: '$validPurchases',
+                      as: 'p',
+                      in: { $ifNull: ['$$p.manualFinancialImpact', '$$p.totalAmount'] }
+                    }
+                }}
+              ]
+            },
+            supplierSettled: { $sum: '$payments.amount' }
+          }
+        },
         {
           $group: {
             _id: null,
-            totalPayables: { $sum: { $subtract: [{ $add: ['$openingBalance', '$totalPurchaseAmount'] }, '$totalPaidAmount'] } },
+            totalPayables: { $sum: { $subtract: ['$supplierProcurement', '$supplierSettled'] } },
             activePartners: { $sum: 1 },
-            procurementVolume: { $sum: { $add: ['$openingBalance', '$totalPurchaseAmount'] } },
-            settledValue: { $sum: '$totalPaidAmount' }
+            procurementVolume: { $sum: '$supplierProcurement' },
+            settledValue: { $sum: '$supplierSettled' }
           }
         }
       ]),
@@ -102,7 +161,19 @@ exports.getDashboardStats = async (req, res, next) => {
       require('../models/Wastage').aggregate([
         { $match: { createdAt: { $gte: today } } },
         { $group: { _id: null, todayLoss: { $sum: '$lossAmount' } } }
-      ])
+      ]),
+      // 5. BUG #7 FIX: Recent orders for Transaction Pulse feed on dashboard
+      // 5. Unified Recent Activity (Real-time Stream)
+      Promise.all([
+        Order.find().sort({ createdAt: -1 }).limit(10).populate('userId', 'name').select('orderNumber pricing.totalAmount orderStatus isGuestOrder createdAt shippingAddress.name userId').lean(),
+        Bill.find({ status: { $ne: 'voided' } }).sort({ createdAt: -1 }).limit(10).populate('salesStaffId', 'name').select('billNumber pricing.totalAmount status createdAt customerDetails.name salesStaffId').lean()
+      ]).then(([orders, bills]) => {
+        const combined = [
+          ...orders.map(o => ({ ...o, type: 'ONLINE', id: o.orderNumber, name: o.shippingAddress?.name || o.userId?.name || 'Online Customer', total: o.pricing?.totalAmount })),
+          ...bills.map(b => ({ ...b, type: 'OFFLINE', id: b.billNumber, name: b.customerDetails?.name || 'Retail Customer', total: b.pricing?.totalAmount, orderStatus: b.status }))
+        ];
+        return combined.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 12);
+      })
     ]);
 
     const stats = revenueStats[0] || { todayRevenue: 0, todayCost: 0, monthRevenue: 0 };
@@ -128,6 +199,7 @@ exports.getDashboardStats = async (req, res, next) => {
       },
       users: (registeredUsers || 0) + (uniqueGuests?.length || 0),
       lowStockProducts: lowStockInventory,
+      recentTransactions: recentOrders,  // This now contains combined data
     };
 
     // Update Cache
@@ -137,9 +209,22 @@ exports.getDashboardStats = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-let analyticsCache = {}; // Map of period+year -> data
-const ANALYTICS_TTL = 0; // Set to 0 to force real-time recalculation every time
+// ── INVENTORY AUDIT & SELF-HEALING ──
+exports.runInventoryAudit = async (req, res, next) => {
+  try {
+    const SyncService = require('../services/sync.service');
+    const auditResults = await SyncService.runGlobalAudit();
+    
+    // Invalidate caches since stock changed
+    dashboardCache = {};
+    analyticsCache = {};
 
+    return ApiResponse.success(res, auditResults, 'Global Inventory Audit & Repair Complete');
+  } catch (error) { next(error); }
+};
+
+
+// ANALYTICS DATA PIPELINE
 exports.getSalesAnalytics = async (req, res, next) => {
   try {
     const { period = 'monthly', year = new Date().getFullYear() } = req.query;
@@ -267,14 +352,58 @@ exports.getSalesAnalytics = async (req, res, next) => {
             value: { $sum: { $multiply: [{ $ifNull: ['$purchasePrice', 0] }, { $subtract: [{ $ifNull: ['$totalStock', 0] }, { $add: [{ $ifNull: ['$onlineSold', 0] }, { $ifNull: ['$offlineSold', 0] }, { $ifNull: ['$damaged', 0] }] }] }] } }
         }}
       ]),
-      // 8. ERP: Supplier Exposure (Strictly Active Partners)
-      require('../models/Supplier').aggregate([
+      // 8. ERP: Supplier Exposure (Direct from Purchase Source of Truth)
+      Supplier.aggregate([
         { $match: { isDeleted: false, isActive: true } },
-        { $group: {
+        {
+          $lookup: {
+            from: 'purchases',
+            let: { supplier_id: '$_id' },
+            pipeline: [
+              { $match: { $expr: { $and: [ { $eq: ['$supplierId', '$$supplier_id'] }, { $ne: ['$isDeleted', true] } ] } } },
+              { $unwind: '$items' },
+              {
+                $lookup: {
+                  from: 'products',
+                  localField: 'items.productId',
+                  foreignField: '_id',
+                  as: 'pInfo'
+                }
+              },
+              { $match: { pInfo: { $ne: [] }, 'pInfo.0.isActive': true } },
+              { $group: {
+                  _id: '$_id',
+                  manualFinancialImpact: { $first: '$pricing.manualFinancialImpact' },
+                  totalAmount: { $first: '$pricing.totalAmount' }
+              }}
+            ],
+            as: 'validPurchases'
+          }
+        },
+        {
+          $addFields: {
+            supplierProcurement: { 
+              $add: [
+                { $ifNull: ['$openingBalance', 0] },
+                { $sum: {
+                    $map: {
+                      input: '$validPurchases',
+                      as: 'p',
+                      in: { $ifNull: ['$$p.pricing.manualFinancialImpact', '$$p.pricing.totalAmount'] }
+                    }
+                }}
+              ]
+            },
+            supplierSettled: { $sum: '$payments.amount' }
+          }
+        },
+        {
+          $group: {
             _id: null,
-            totalPayables: { $sum: { $subtract: [{ $add: ['$openingBalance', '$totalPurchaseAmount'] }, '$totalPaidAmount'] } },
+            totalPayables: { $sum: { $subtract: ['$supplierProcurement', '$supplierSettled'] } },
             activePartners: { $sum: 1 }
-        }}
+          }
+        }
       ])
     ]);
 
@@ -292,7 +421,10 @@ exports.getSalesAnalytics = async (req, res, next) => {
     }
 
     // --- HIGH IMPACT FEATURES (ADDITIONAL DATA) ---
-    const [extraMetrics, recentActivity] = await Promise.all([
+    // BUG #1 FIX: Properly destructure all 3 Promise.all results
+    // Previously only 2 were destructured, the 3rd (topProducts) was silently dropped
+    // causing a duplicate aggregation query and wrong variable assignment
+    const [staffPerformance, recentActivity, topProductsVisual] = await Promise.all([
       // 1. Staff Leaderboard (From Bills)
       Bill.aggregate([
         { $match: { ...match, status: { $ne: 'voided' } } },
@@ -305,20 +437,24 @@ exports.getSalesAnalytics = async (req, res, next) => {
       ]),
       // 2. Recent Combined Activity (Real-time Stream)
       Promise.all([
-        Order.find().sort({ createdAt: -1 }).limit(10).select('billNumber pricing.totalAmount createdAt isGuestOrder shippingAddress.name'),
-        Bill.find({ status: { $ne: 'voided' } }).sort({ createdAt: -1 }).limit(10).select('billNumber pricing.totalAmount createdAt staffName customerDetails.name')
+        Order.find().sort({ createdAt: -1 }).limit(10).select('orderNumber pricing.totalAmount createdAt isGuestOrder shippingAddress.name'),
+        Bill.find({ status: { $ne: 'voided' } }).sort({ createdAt: -1 }).limit(10).select('billNumber pricing.totalAmount createdAt customerDetails.name')
       ]).then(([orders, bills]) => {
         const combined = [
-          ...orders.map(o => ({ type: 'ONLINE', id: o.billNumber || 'ORD', total: o.pricing.totalAmount, date: o.createdAt, name: o.shippingAddress?.name || 'Guest' })),
+          ...orders.map(o => ({ type: 'ONLINE', id: o.orderNumber || 'ORD', total: o.pricing.totalAmount, date: o.createdAt, name: o.shippingAddress?.name || 'Guest' })),
           ...bills.map(b => ({ type: 'OFFLINE', id: b.billNumber, total: b.pricing.totalAmount, date: b.createdAt, name: b.customerDetails?.name || 'Retail' }))
         ];
-        return combined.sort((a,b) => b.date - a.date).slice(0, 15);
+        return combined.sort((a, b) => b.date - a.date).slice(0, 15);
       }),
-      // 3. Top Products with Images
+      // 3. Top Products with Images — BUG #2 FIX: use correct `status: $ne voided` for bills
       Order.aggregate([
         { $match: orderMatch },
         { $unwind: '$items' },
-        { $unionWith: { coll: 'bills', pipeline: [ { $match: { ...match, isDeleted: { $ne: true } } }, { $unwind: '$items' } ] }},
+        { $unionWith: { coll: 'bills', pipeline: [
+          // BUG #2 FIX: bills have no `isDeleted` field — use status: $ne voided
+          { $match: { ...match, status: { $ne: 'voided' } } },
+          { $unwind: '$items' }
+        ]}},
         { $group: { _id: '$items.productId', name: { $first: '$items.productName' }, qty: { $sum: '$items.quantity' }, rev: { $sum: '$items.total' } } },
         { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'p' } },
         { $unwind: { path: '$p', preserveNullAndEmptyArrays: true } },
@@ -327,20 +463,7 @@ exports.getSalesAnalytics = async (req, res, next) => {
         { $limit: 8 }
       ])
     ]);
-
-    const staffPerformance = extraMetrics;
-    const topProducts = await Promise.resolve(recentActivity); // Wait, I misaligned indices
-    const topProductsVisual = (await Promise.all([Order.aggregate([
-      { $match: orderMatch },
-      { $unwind: '$items' },
-      { $unionWith: { coll: 'bills', pipeline: [ { $match: { ...match, status: { $ne: 'voided' } } }, { $unwind: '$items' } ] }},
-      { $group: { _id: '$items.productId', name: { $first: '$items.productName' }, qty: { $sum: '$items.quantity' }, rev: { $sum: '$items.total' } } },
-      { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'p' } },
-      { $unwind: { path: '$p', preserveNullAndEmptyArrays: true } },
-      { $project: { name: 1, qty: 1, rev: 1, image: { $arrayElemAt: ['$p.images', 0] } } },
-      { $sort: { qty: -1 } },
-      { $limit: 8 }
-    ])]))[0];
+    // NOTE: topProducts, staffPerformance, recentActivity now correctly assigned — no duplicate query
 
     const finalAnalytics = { 
       data: results[0], 
@@ -487,6 +610,56 @@ exports.toggleBlockUser = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
+exports.deleteUser = async (req, res, next) => {
+  try {
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { isDeleted: true },
+      { new: true }
+    );
+    if (!user) return ApiResponse.notFound(res, 'Customer not found');
+    return ApiResponse.success(res, null, 'Customer account successfully deleted');
+  } catch (error) { next(error); }
+};
+
+exports.createCustomer = async (req, res, next) => {
+  try {
+    const { name, phone } = req.body;
+    if (!name || !phone) {
+      return ApiResponse.badRequest(res, 'Name and phone number are required');
+    }
+    
+    const cleanPhone = phone.replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      return ApiResponse.badRequest(res, 'Invalid 10-digit phone number');
+    }
+    
+    // Check if customer already exists
+    const existing = await User.findOne({ phone: cleanPhone });
+    if (existing) {
+      if (existing.isDeleted) {
+        existing.isDeleted = false;
+        existing.name = name;
+        await existing.save();
+        return ApiResponse.success(res, existing, 'Customer successfully restored & registered');
+      }
+      return ApiResponse.badRequest(res, 'Customer with this phone number already exists');
+    }
+    
+    const randomPassword = `magizhchi_${Math.random().toString(36).slice(-8)}${Date.now().toString().slice(-4)}`;
+    
+    const customer = await User.create({
+      name,
+      phone: cleanPhone,
+      password: randomPassword,
+      role: 'user',
+      isVerified: true
+    });
+    
+    return ApiResponse.created(res, customer, 'Customer successfully registered in database');
+  } catch (error) { next(error); }
+};
+
 exports.createStaff = async (req, res, next) => {
   try {
     const { name, email, phone, password } = req.body;
@@ -520,9 +693,18 @@ exports.getStaff = async (req, res, next) => {
 
 exports.deleteStaff = async (req, res, next) => {
   try {
-    const staff = await User.findOneAndDelete({ _id: req.params.id, role: 'staff' });
+    const staff = await User.findByIdAndUpdate(
+      req.params.id, 
+      { 
+        isDeleted: true, 
+        isActive: false, 
+        role: 'deleted_staff',
+        deletedAt: new Date()
+      },
+      { new: true }
+    );
     if (!staff) return ApiResponse.notFound(res, 'Staff not found');
-    return ApiResponse.success(res, null, 'Staff account deleted');
+    return ApiResponse.success(res, null, 'Staff account archived and unlinked');
   } catch (error) { next(error); }
 };
 
@@ -602,6 +784,12 @@ exports.updateSettings = async (req, res, next) => {
         }
         updateData['notifications.email.alertEmail'] = sanitizedEmail;
         updateData['notifications.email.apiKey'] = settingsData.notifications.email.apiKey;
+        updateData['notifications.email.host'] = settingsData.notifications.email.host || '';
+        updateData['notifications.email.port'] = Number(settingsData.notifications.email.port) || 587;
+        updateData['notifications.email.user'] = settingsData.notifications.email.user || '';
+        if (settingsData.notifications.email.password !== undefined && settingsData.notifications.email.password !== '') {
+          updateData['notifications.email.password'] = settingsData.notifications.email.password;
+        }
       }
 
       // 2. Map WhatsApp Notifications
@@ -918,24 +1106,41 @@ exports.resetSystemData = async (req, res, next) => {
       reviewsCleared: 0,
       suppliersCleared: 0,
       purchasesCleared: 0,
+      cartsCleared: 0,
+      broadcastsCleared: 0,
+      broadcastLogsCleared: 0,
     };
 
-    // 1. Reset Offline Bills / POS Transactions
-    if (selections?.offlineBills || selections?.analysis) {
+    // 1. Reset Offline Store Bills & POS Invoices
+    if (selections?.offlineBills) {
       const deletedBills = await Bill.deleteMany({});
-      const deletedOrders = await Order.deleteMany({});
       const Return = require('../models/Return');
       const deletedReturns = await Return.deleteMany({});
 
       result.billsCleared = deletedBills.deletedCount;
-      result.ordersCleared = deletedOrders.deletedCount;
       result.returnsCleared = deletedReturns.deletedCount;
 
-      // Reset sold counts in Inventory
-      await Inventory.updateMany({}, { $set: { offlineSold: 0, onlineSold: 0 } });
+      // Reset offline sold count in inventory
+      await Inventory.updateMany({}, { $set: { offlineSold: 0 } });
     }
 
-    // 2. Reset Stock Movements & Wastage
+    // 2. Reset Online Customer Orders
+    if (selections?.orders) {
+      const deletedOrders = await Order.deleteMany({});
+      result.ordersCleared = deletedOrders.deletedCount;
+
+      // Reset online sold count in inventory
+      await Inventory.updateMany({}, { $set: { onlineSold: 0 } });
+    }
+
+    // 3. Reset POS / Create Bill Active Cart Sessions
+    if (selections?.createBill) {
+      const Cart = require('../models/Cart');
+      const deletedCarts = await Cart.deleteMany({});
+      result.cartsCleared = deletedCarts.deletedCount;
+    }
+
+    // 4. Reset Stock Movements & Wastages (Analysis Logs)
     if (selections?.analysis) {
       const StockMovement = require('../models/StockMovement');
       const deletedMovements = await StockMovement.deleteMany({});
@@ -946,47 +1151,58 @@ exports.resetSystemData = async (req, res, next) => {
       result.wastagesCleared = deletedWastages.deletedCount;
     }
 
-    // 3. Reset Product Categories
+    // 5. Reset Broadcast Center logs
+    if (selections?.broadcast) {
+      const Broadcast = require('../models/Broadcast');
+      const BroadcastLog = require('../models/BroadcastLog');
+      const deletedBroadcasts = await Broadcast.deleteMany({});
+      const deletedLogs = await BroadcastLog.deleteMany({});
+
+      result.broadcastsCleared = deletedBroadcasts.deletedCount;
+      result.broadcastLogsCleared = deletedLogs.deletedCount;
+    }
+
+    // 6. Reset Product Categories
     if (selections?.category) {
       const Category = require('../models/Category');
       const deletedCats = await Category.deleteMany({});
       result.categoriesCleared = deletedCats.deletedCount;
     }
 
-    // 4. Reset Product Catalog
+    // 7. Reset Product Catalog (Profiles)
     if (selections?.catalog) {
       const deletedProds = await Product.deleteMany({});
       const deletedInv = await Inventory.deleteMany({});
       result.productsCleared = deletedProds.deletedCount;
     }
 
-    // 5. Reset Customer Users
+    // 8. Reset Customer Users
     if (selections?.customer) {
       const deletedCusts = await User.deleteMany({ role: 'user' });
       result.customersCleared = deletedCusts.deletedCount;
     }
 
-    // 6. Reset Staff Accounts
+    // 9. Reset Staff Accounts
     if (selections?.staff) {
       const deletedStaff = await User.deleteMany({ role: 'staff' });
       result.staffCleared = deletedStaff.deletedCount;
     }
 
-    // 7. Reset Banner Advertisements
+    // 10. Reset Banner Advertisements
     if (selections?.banners) {
       const Banner = require('../models/Banner');
       const deletedBanners = await Banner.deleteMany({});
       result.bannersCleared = deletedBanners.deletedCount;
     }
 
-    // 8. Reset Customer Reviews
+    // 11. Reset Customer Reviews
     if (selections?.reviews) {
       const Review = require('../models/Review');
       const deletedReviews = await Review.deleteMany({});
       result.reviewsCleared = deletedReviews.deletedCount;
     }
 
-    // 9. Reset Procurement Hub (Suppliers & Purchases)
+    // 12. Reset Procurement Hub (Suppliers & Purchases)
     if (selections?.procurement) {
       const Supplier = require('../models/Supplier');
       const deletedSuppliers = await Supplier.deleteMany({});
@@ -996,9 +1212,8 @@ exports.resetSystemData = async (req, res, next) => {
     }
 
     // Always clear dashboard and analysis cache if anything reset
-    if (selections?.dashboard || selections?.analysis || selections?.offlineBills || selections?.procurement) {
-      dashboardCache = { data: null, lastUpdated: 0 };
-      analyticsCache = {};
+    if (selections?.dashboard || selections?.analysis || selections?.offlineBills || selections?.orders || selections?.procurement) {
+      exports.clearDashboardCache();
     }
 
     logger.info(`🚨 GRANULAR SYSTEM RESET COMPLETE:`, result);

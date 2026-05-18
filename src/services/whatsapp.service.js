@@ -14,6 +14,23 @@ const logger = require('../utils/logger');
 const Settings = require('../models/Settings');
 const WhatsAppSession = require('../models/WhatsAppSession');
 
+// Suppress libsignal noisy console logs
+const originalConsoleLog = console.log;
+console.log = function (...args) {
+    if (typeof args[0] === 'string' && args[0].includes('Decrypted message with closed session')) {
+        return;
+    }
+    originalConsoleLog.apply(console, args);
+};
+
+const originalConsoleError = console.error;
+console.error = function (...args) {
+    if (typeof args[0] === 'string' && args[0].includes('Decrypted message with closed session')) {
+        return;
+    }
+    originalConsoleError.apply(console, args);
+};
+
 let sock = null;
 let isReady = false;
 let isInitializing = false;
@@ -223,6 +240,30 @@ const initWhatsApp = async () => {
         }
     });
 
+    // ─── MESSAGE ACKNOWLEDGEMENT TRACKER ───
+    sock.ev.on('messages.update', async (updates) => {
+        const BroadcastLog = require('../models/BroadcastLog');
+        const Broadcast = require('../models/Broadcast');
+        
+        for (const update of updates) {
+            const { key, update: msgUpdate } = update;
+            // status 3 = delivered, 4 = read (blue checks)
+            if (msgUpdate.status === 3 || msgUpdate.status === 4) {
+                const log = await BroadcastLog.findOneAndUpdate(
+                    { messageId: key.id, status: { $ne: 'failed' } },
+                    { status: 'delivered', deliveredAt: new Date() }
+                );
+
+                if (log && log.status !== 'delivered') {
+                    // Update the master broadcast stats
+                    await Broadcast.findByIdAndUpdate(log.broadcastId, {
+                        $inc: { 'stats.delivered': 1 }
+                    });
+                }
+            }
+        }
+    });
+
     return sock;
 };
 
@@ -247,14 +288,17 @@ const sendMessage = async (phone, message, options = {}, retries = 3) => {
                 if (!isReady) throw new Error('WhatsApp socket not ready after 30s');
             }
 
+            let result;
             if (image) {
-                await sock.sendMessage(jid, { image: { url: image }, caption: message });
+                result = await sock.sendMessage(jid, { 
+                    image: { url: image }, 
+                    caption: message 
+                });
             } else {
-                await sock.sendMessage(jid, { text: message });
+                result = await sock.sendMessage(jid, { text: message });
             }
-            
             logger.info(`✅ WhatsApp message ${image ? 'with image ' : ''}sent to +${withCountry}`);
-            return true;
+            return result;
         } catch (err) {
             logger.warn(`⚠️ WhatsApp Send Attempt ${i + 1} failed: ${err.message}`);
             if (i === retries - 1) throw err;
@@ -437,5 +481,17 @@ module.exports = {
     isReady: () => isReady,
     getQRLink: () => currentQR ? `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(currentQR)}&size=300x300` : null,
     closeWhatsApp,
-    getStatus
+    clearSessionFromDb,
+    getStatus,
+    isRegistered: async (phone) => {
+        if (!sock || !isReady) return false;
+        try {
+            // Standardize phone format for check
+            const jid = phone.includes('@') ? phone : `${phone}@s.whatsapp.net`;
+            const [result] = await sock.onWhatsApp(jid);
+            return result?.exists || false;
+        } catch (err) {
+            return false;
+        }
+    }
 };

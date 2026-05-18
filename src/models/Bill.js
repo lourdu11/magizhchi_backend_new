@@ -7,8 +7,21 @@ const billItemSchema = new mongoose.Schema({
   sku:         String,
   hsnCode:     { type: String, default: '6205' },
   variant:     { size: String, color: String },
+  isCombo:     { type: Boolean, default: false },
+  comboSelections: [
+    {
+      productRef: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+      inventoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Inventory' },
+      productName: { type: String },
+      size: { type: String },
+      color: { type: String },
+      sku: { type: String }
+    }
+  ],
   quantity:    { type: Number, required: true, min: 1 },
   price:       { type: Number, required: true },
+  purchasePrice: { type: Number, default: 0 }, // Snapshot of cost at sale time
+  sellingPrice: { type: Number },              // Snapshot of MSRP at sale time
   taxableValue: Number,
   cgst:        { type: Number, default: 0 },
   sgst:        { type: Number, default: 0 },
@@ -65,6 +78,12 @@ const billSchema = new mongoose.Schema(
     voidedReason: String,
     voidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     voidedAt: Date,
+    idempotencyKey: { 
+      type: String, 
+      unique: true, 
+      sparse: true,
+      index: true
+    }
   },
   { timestamps: true }
 );
@@ -74,6 +93,11 @@ billSchema.index({ staffId: 1 });
 billSchema.index({ createdAt: -1 });
 billSchema.index({ 'items.productId': 1 });
 billSchema.index({ 'items.inventoryId': 1 });
+billSchema.index({ salesStaffId: 1, createdAt: -1 });
+billSchema.index({ status: 1, createdAt: -1 });
+billSchema.index({ 'customerDetails.phone': 1 });
 
+// High-Performance Analytics Aggregation Index
+billSchema.index({ createdAt: -1, status: 1, staffId: 1 });
 
 module.exports = mongoose.model('Bill', billSchema);

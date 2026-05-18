@@ -55,12 +55,14 @@ const userSchema = new mongoose.Schema(
     lockUntil: { type: Date },
     refreshToken: { type: String, select: false },
     commissionRate: { type: Number, default: 0 }, // For staff: percentage of sales
+    isDeleted: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
 
 // Indexes — role only (email/phone unique already set in schema field definition)
 userSchema.index({ role: 1 });
+userSchema.index({ gstin: 1 }, { sparse: true });
 
 
 // Hash password before save

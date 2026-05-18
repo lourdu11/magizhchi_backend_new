@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 // Free-text purchase item — no productId ref needed
 const purchaseItemSchema = new mongoose.Schema({
+  productId:   { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
   productName: { type: String, required: true, trim: true },
   category:    { type: String, trim: true, default: 'Uncategorized' },
   color:       { type: String, trim: true, default: '' },
@@ -11,6 +12,8 @@ const purchaseItemSchema = new mongoose.Schema({
   gstPercent:  { type: Number, default: 5 },
   sellingPrice: { type: Number, default: 0 },
   total:        { type: Number, default: 0 },
+  sku:          { type: String, trim: true },
+  barcode:      { type: String, trim: true },
   images:       [{ type: String }],
 });
 
@@ -25,6 +28,7 @@ const purchaseSchema = new mongoose.Schema(
       subtotal:    { type: Number, default: 0 },
       gstAmount:   { type: Number, default: 0 },
       totalAmount: { type: Number, default: 0 },
+      manualFinancialImpact: { type: Number, default: null }
     },
     status: { type: String, enum: ['draft', 'received', 'cancelled'], default: 'received' },
     paidAmount: { type: Number, default: 0 }, // Per bill payment tracking

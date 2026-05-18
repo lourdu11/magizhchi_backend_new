@@ -4,7 +4,7 @@ const ApiResponse = require('../utils/apiResponse');
 exports.getWishlist = async (req, res, next) => {
   try {
     let wishlist = await Wishlist.findOne({ userId: req.user._id })
-      .populate('products.productId', 'name slug images sellingPrice discountedPrice isActive ratings');
+      .populate('products.productId', 'name slug images sellingPrice discountedPrice isActive ratings variants');
     if (!wishlist) wishlist = { products: [] };
     return ApiResponse.success(res, { wishlist });
   } catch (error) { next(error); }

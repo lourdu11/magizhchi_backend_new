@@ -1,37 +1,51 @@
 const mongoose = require('mongoose');
 const logger = require('../utils/logger');
 
-const connectDB = async () => {
+const connectDB = async (retryCount = 0) => {
+  const MAX_RETRIES = 5;
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI, {
-      serverSelectionTimeoutMS: 10000, // Increased timeout
-      socketTimeoutMS: 45000,
-      maxPoolSize: 20,
+    let uri = process.env.MONGODB_URI;
+
+    const conn = await mongoose.connect(uri, {
+      serverSelectionTimeoutMS: 30000, // 30s for cloud stability
+      socketTimeoutMS: 60000,         // 60s for heavy aggregations
+      maxPoolSize: 50,                // Higher concurrency
+      minPoolSize: 5,                 // Keep some connections alive
+      heartbeatFrequencyMS: 2000,     // Detect disconnects faster
+      retryWrites: true,
+      w: 'majority'
     });
-    logger.info(`MongoDB Connected: ${conn.connection.host}`);
+    logger.info(`✅ MongoDB Connected: ${conn.connection.host}`);
   } catch (error) {
-    logger.error(`❌ MongoDB Connection Error: ${error.message}`);
+    logger.error(`❌ MongoDB Connection Error (Attempt ${retryCount + 1}): ${error.message}`);
     
     // Help the user identify their IP for whitelisting
-    try {
-      const axios = require('axios');
-      const response = await axios.get('https://api.ipify.org?format=json');
-      logger.info(`💡 Your Public IP: ${response.data.ip}`);
-      logger.info(`👉 Add this IP to your Atlas Whitelist: https://cloud.mongodb.com`);
-    } catch (ipErr) {
-      // Ignore IP fetch errors
+    if (retryCount === 0) {
+      try {
+        const axios = require('axios');
+        const response = await axios.get('https://api.ipify.org?format=json');
+        logger.info(`💡 Your Public IP: ${response.data.ip}`);
+        logger.info(`👉 Add this IP to your Atlas Whitelist: https://cloud.mongodb.com`);
+      } catch (ipErr) { /* ignore */ }
     }
-    
-    process.exit(1);
+
+    if (retryCount < MAX_RETRIES) {
+      const delay = Math.pow(2, retryCount) * 1000;
+      logger.info(`🔄 Retrying in ${delay/1000}s...`);
+      setTimeout(() => connectDB(retryCount + 1), delay);
+    } else {
+      logger.error('🔥 CRITICAL: Max MongoDB connection retries reached. Exiting.');
+      process.exit(1);
+    }
   }
 };
 
 mongoose.connection.on('disconnected', () => {
-  logger.warn('MongoDB disconnected. Attempting to reconnect...');
+  logger.warn('⚠️ MongoDB disconnected. Attempting to reconnect...');
 });
 
 mongoose.connection.on('reconnected', () => {
-  logger.info('MongoDB reconnected successfully');
+  logger.info('✅ MongoDB reconnected successfully');
 });
 
 module.exports = connectDB;

@@ -31,6 +31,16 @@ const generateInvoiceNumber = () => {
   return `INV-${dateStr}-${unique}`;
 };
 
+/**
+ * Generate Purchase Number: PUR-20260421-A3F7B2
+ */
+const generatePurchaseNumber = () => {
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const unique = Date.now().toString(36).toUpperCase().slice(-4) +
+    Math.random().toString(36).toUpperCase().slice(-2);
+  return `PUR-${dateStr}-${unique}`;
+};
+
 
 /**
  * Generate 6-digit OTP
@@ -48,10 +58,26 @@ const generateSKU = (category = 'GEN') => {
   return `MG-${prefix}-${random}`;
 };
 
+const Counter = require('../models/Counter');
+
+const getNextSequence = async (id, session = null) => {
+  const options = { new: true, upsert: true };
+  if (session) options.session = session;
+
+  const counter = await Counter.findOneAndUpdate(
+    { id },
+    { $inc: { seq: 1 } },
+    options
+  );
+  return counter.seq;
+};
+
 module.exports = {
   generateOrderNumber,
   generateBillNumber,
   generateInvoiceNumber,
+  generatePurchaseNumber,
   generateOTP,
   generateSKU,
+  getNextSequence,
 };

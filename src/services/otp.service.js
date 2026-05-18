@@ -41,7 +41,7 @@ const sendOTP = async (rawIdentifier, purpose = 'register') => {
   logger.info(`📟 OTP: DB record created successfully.`);
 
   if (process.env.NODE_ENV !== 'production') {
-    console.log('DEBUG: Flow Detection -> isEmail:', isEmailId, 'isPhone:', isPhoneId, 'normalized:', identifier);
+    logger.info(`DEBUG: Flow Detection -> isEmail: ${isEmailId} isPhone: ${isPhoneId} normalized: ${identifier}`);
     
     // Always log OTP in terminal (dev safety net)
     logger.info('');

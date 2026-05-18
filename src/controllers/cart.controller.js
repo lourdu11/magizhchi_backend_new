@@ -5,40 +5,116 @@ const ApiResponse = require('../utils/apiResponse');
 exports.getCart = async (req, res, next) => {
   try {
     let cart = await Cart.findOne({ userId: req.user._id })
-      .populate('items.productId', 'name images sellingPrice discountedPrice isActive');
-    if (!cart) cart = { items: [] };
+      .populate('items.productId', 'name images sellingPrice discountedPrice isActive isDeleted');
+    
+    if (!cart) {
+      return ApiResponse.success(res, { cart: { items: [] } });
+    }
+
+    // ── LOGICAL CLEANUP: Auto-remove items for deleted or inactive products ──
+    const originalCount = cart.items.length;
+    cart.items = cart.items.filter(item => 
+      item.productId && 
+      item.productId.isActive !== false && 
+      item.productId.isDeleted !== true
+    );
+
+    if (cart.items.length !== originalCount) {
+      await cart.save(); // Silently sync cart state
+    }
+
     return ApiResponse.success(res, { cart });
   } catch (error) { next(error); }
 };
 
 exports.addToCart = async (req, res, next) => {
   try {
-    const { productId, size, color, quantity = 1 } = req.body;
+    const { productId, size, color, quantity = 1, comboSelections } = req.body;
     const product = await Product.findById(productId);
     if (!product || !product.isActive) return ApiResponse.notFound(res, 'Product not found');
 
-    // ─── BUG FIX: Check availability from Inventory (not legacy Product.variants) ─
     const Inventory = require('../models/Inventory');
-    const invItem = await Inventory.findOne({
-      productName: product.name, size, color, onlineEnabled: true,
-    });
-    if (!invItem) return ApiResponse.error(res, 'This variant is not available for online purchase', 404);
-
-    const available = invItem.totalStock - invItem.onlineSold - invItem.offlineSold
-      - (invItem.reservedStock || 0) + invItem.returned - invItem.damaged;
-    if (available < quantity) return ApiResponse.error(res, `Only ${Math.max(0, available)} items available`, 400);
-
     let cart = await Cart.findOne({ userId: req.user._id });
     if (!cart) cart = await Cart.create({ userId: req.user._id, items: [] });
 
-    const existingIdx = cart.items.findIndex(
-      i => i.productId.toString() === productId && i.variant.size === size && i.variant.color === color
-    );
+    // Helper to get aggregate stock for a variant
+    const getVariantStock = async (query) => {
+      const items = await Inventory.find({ ...query, onlineEnabled: true, isDeleted: false });
+      if (items.length === 0) return { exists: false, available: 0 };
+      
+      const totalAvailable = items.reduce((sum, inv) => {
+        const avail = inv.totalStock - inv.onlineSold - inv.offlineSold
+          - (inv.reservedStock || 0) + inv.returned - inv.damaged;
+        return sum + Math.max(0, avail);
+      }, 0);
+      
+      return { exists: true, available: totalAvailable };
+    };
 
-    if (existingIdx > -1) {
-      cart.items[existingIdx].quantity = Math.min(available, cart.items[existingIdx].quantity + quantity);
-    } else {
-      cart.items.push({ productId, variant: { size, color }, quantity });
+    // ─── COMBO PRODUCT LOGIC ──────────────────────────────────────
+    if (product.productNature === 'combo') {
+      if (!comboSelections || comboSelections.length === 0) 
+        return ApiResponse.error(res, 'Bundle configuration required', 400);
+
+      // 1. Verify stock for ALL selected items in the bundle
+      for (const selection of comboSelections) {
+        const stockInfo = await getVariantStock({
+          $or: [
+            { productRef: selection.productRef, size: { $regex: new RegExp(`^${selection.size}$`, 'i') }, color: { $regex: new RegExp(`^${selection.color}$`, 'i') } },
+            { productName: selection.productName, size: { $regex: new RegExp(`^${selection.size}$`, 'i') }, color: { $regex: new RegExp(`^${selection.color}$`, 'i') } }
+          ]
+        });
+
+        if (!stockInfo.exists) 
+          return ApiResponse.error(res, `${selection.productName} (${selection.size}) is not found in active inventory`, 404);
+        
+        if (stockInfo.available < quantity) 
+          return ApiResponse.error(res, `Only ${stockInfo.available} of ${selection.productName} available`, 400);
+      }
+
+      // 2. Add to cart (Unique check: same productId + same selections)
+      const existingIdx = cart.items.findIndex(i => 
+        i.productId.toString() === productId && 
+        i.isCombo && 
+        JSON.stringify(i.comboSelections) === JSON.stringify(comboSelections)
+      );
+
+      if (existingIdx > -1) {
+        cart.items[existingIdx].quantity = Math.min(10, cart.items[existingIdx].quantity + quantity);
+      } else {
+        cart.items.push({ productId, isCombo: true, comboSelections, quantity });
+      }
+    } 
+    // ─── STANDALONE PRODUCT LOGIC ─────────────────────────────────
+    else {
+      const stockInfo = await getVariantStock({
+        productRef: product._id, 
+        size: { $regex: new RegExp(`^${size}$`, 'i') }, 
+        color: { $regex: new RegExp(`^${color}$`, 'i') }
+      });
+
+      if (!stockInfo.exists) {
+         // Fallback to name-based lookup for legacy items
+         const fallback = await getVariantStock({
+            productName: product.name,
+            size: { $regex: new RegExp(`^${size}$`, 'i') }, 
+            color: { $regex: new RegExp(`^${color}$`, 'i') }
+         });
+         if (!fallback.exists) return ApiResponse.error(res, 'This variant is not available for online purchase', 404);
+         stockInfo.available = fallback.available;
+      }
+
+      if (stockInfo.available < quantity) return ApiResponse.error(res, `Only ${stockInfo.available} items available`, 400);
+
+      const existingIdx = cart.items.findIndex(
+        i => i.productId.toString() === productId && !i.isCombo && i.variant.size === size && i.variant.color === color
+      );
+
+      if (existingIdx > -1) {
+        cart.items[existingIdx].quantity = Math.min(stockInfo.available, cart.items[existingIdx].quantity + quantity);
+      } else {
+        cart.items.push({ productId, variant: { size, color }, quantity });
+      }
     }
 
     await cart.save();
