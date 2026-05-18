@@ -9,8 +9,13 @@ const auditLogSchema = new mongoose.Schema(
     details: { type: mongoose.Schema.Types.Mixed }, // JSON payload of what changed
     ipAddress: String,
     userAgent: String,
-    status: { type: String, enum: ['success', 'failure'], default: 'success' },
+    status: { type: String, enum: ['success', 'failure', 'cleaned'], default: 'success' },
     errorMessage: String,
+    // ── Data Reset Safety Fields ──
+    modulesReset: [{ type: String }],
+    documentsCounts: { type: mongoose.Schema.Types.Mixed }, // e.g. { products: 142 }
+    backupPath: { type: String }, // Path or identifier to JSON backup
+    canRestoreUntil: { type: Date }, // 30-min grace period expiration
   },
   { timestamps: true }
 );

@@ -58,6 +58,12 @@ r.put('/settings', isAdmin, c.updateSettings);
 r.post('/test-notifications-v2', isAdmin, c.testNotifications);
 r.post('/reset-system-data', isAdmin, c.resetSystemData);
 
+// ── Data Reset Safety Routes ──
+const backupController = require('../controllers/backup.controller');
+r.get('/system-backups', isAdmin, backupController.getAvailableRestores);
+r.post('/restore-system-data', isAdmin, backupController.restoreLastReset);
+r.get('/sync-integrity', isAdmin, c.getSyncIntegrityStats);
+
 // ─── Broadcast Center ─────────────────────────────────────────
 const broadcastController = require('../controllers/broadcast.controller');
 r.get('/broadcast/customers', isAdmin, broadcastController.getBroadcastCustomers);

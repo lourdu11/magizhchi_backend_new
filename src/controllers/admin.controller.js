@@ -1088,136 +1088,90 @@ exports.getServiceHealth = async (req, res, next) => {
 
 exports.resetSystemData = async (req, res, next) => {
   try {
-    const { selections } = req.body;
+    const { selections, otp } = req.body;
     const logger = require('../utils/logger');
+    const { sendOTP, verifyOTP } = require('../services/otp.service');
+    const backupController = require('./backup.controller');
+    const AuditLog = require('../models/AuditLog');
+
     logger.info(`🚨 CRITICAL ACTION: Admin initiated granular system data reset! Selections:`, selections);
 
-    const result = {
-      billsCleared: 0,
-      ordersCleared: 0,
-      movementsCleared: 0,
-      wastagesCleared: 0,
-      returnsCleared: 0,
-      categoriesCleared: 0,
-      productsCleared: 0,
-      customersCleared: 0,
-      staffCleared: 0,
-      bannersCleared: 0,
-      reviewsCleared: 0,
-      suppliersCleared: 0,
-      purchasesCleared: 0,
-      cartsCleared: 0,
-      broadcastsCleared: 0,
-      broadcastLogsCleared: 0,
-    };
-
-    // 1. Reset Offline Store Bills & POS Invoices
-    if (selections?.offlineBills) {
-      const deletedBills = await Bill.deleteMany({});
-      const Return = require('../models/Return');
-      const deletedReturns = await Return.deleteMany({});
-
-      result.billsCleared = deletedBills.deletedCount;
-      result.returnsCleared = deletedReturns.deletedCount;
-
-      // Reset offline sold count in inventory
-      await Inventory.updateMany({}, { $set: { offlineSold: 0 } });
+    // ── LAYER 5: OTP VERIFICATION ──
+    const identifier = req.user.email || req.user.phone; // Assuming req.user is populated by auth middleware
+    if (!otp) {
+      logger.info(`🛡️ Data Reset OTP Challenge initiated for: ${identifier}`);
+      const result = await sendOTP(identifier, 'data_reset_2fa');
+      return ApiResponse.success(res, {
+        status: 'OTP_REQUIRED',
+        method: result.method,
+      }, `Destructive action detected. Enter the OTP sent to your ${result.method === 'whatsapp' ? 'WhatsApp' : 'email'}.`);
     }
 
-    // 2. Reset Online Customer Orders
-    if (selections?.orders) {
-      const deletedOrders = await Order.deleteMany({});
-      result.ordersCleared = deletedOrders.deletedCount;
+    // Verify OTP
+    await verifyOTP(identifier, otp, 'data_reset_2fa', true);
+    logger.info(`🔓 OTP Verified. Proceeding with Data Reset...`);
 
-      // Reset online sold count in inventory
-      await Inventory.updateMany({}, { $set: { onlineSold: 0 } });
-    }
+    const timestampStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    
+    // ── LAYER 3: AUTO BACKUP JSON ──
+    const backupResult = await backupController.exportCollectionsToBackup(selections, timestampStr);
+    
+    // ── LAYER 4: SOFT DELETE TO SHADOW COLLECTIONS ──
+    const shadowStats = await backupController.softDeleteToShadow(selections, timestampStr);
 
-    // 3. Reset POS / Create Bill Active Cart Sessions
-    if (selections?.createBill) {
-      const Cart = require('../models/Cart');
-      const deletedCarts = await Cart.deleteMany({});
-      result.cartsCleared = deletedCarts.deletedCount;
-    }
-
-    // 4. Reset Stock Movements & Wastages (Analysis Logs)
-    if (selections?.analysis) {
-      const StockMovement = require('../models/StockMovement');
-      const deletedMovements = await StockMovement.deleteMany({});
-      const Wastage = require('../models/Wastage');
-      const deletedWastages = await Wastage.deleteMany({});
-
-      result.movementsCleared = deletedMovements.deletedCount;
-      result.wastagesCleared = deletedWastages.deletedCount;
-    }
-
-    // 5. Reset Broadcast Center logs
-    if (selections?.broadcast) {
-      const Broadcast = require('../models/Broadcast');
-      const BroadcastLog = require('../models/BroadcastLog');
-      const deletedBroadcasts = await Broadcast.deleteMany({});
-      const deletedLogs = await BroadcastLog.deleteMany({});
-
-      result.broadcastsCleared = deletedBroadcasts.deletedCount;
-      result.broadcastLogsCleared = deletedLogs.deletedCount;
-    }
-
-    // 6. Reset Product Categories
-    if (selections?.category) {
-      const Category = require('../models/Category');
-      const deletedCats = await Category.deleteMany({});
-      result.categoriesCleared = deletedCats.deletedCount;
-    }
-
-    // 7. Reset Product Catalog (Profiles)
-    if (selections?.catalog) {
-      const deletedProds = await Product.deleteMany({});
-      const deletedInv = await Inventory.deleteMany({});
-      result.productsCleared = deletedProds.deletedCount;
-    }
-
-    // 8. Reset Customer Users
-    if (selections?.customer) {
-      const deletedCusts = await User.deleteMany({ role: 'user' });
-      result.customersCleared = deletedCusts.deletedCount;
-    }
-
-    // 9. Reset Staff Accounts
-    if (selections?.staff) {
-      const deletedStaff = await User.deleteMany({ role: 'staff' });
-      result.staffCleared = deletedStaff.deletedCount;
-    }
-
-    // 10. Reset Banner Advertisements
-    if (selections?.banners) {
-      const Banner = require('../models/Banner');
-      const deletedBanners = await Banner.deleteMany({});
-      result.bannersCleared = deletedBanners.deletedCount;
-    }
-
-    // 11. Reset Customer Reviews
-    if (selections?.reviews) {
-      const Review = require('../models/Review');
-      const deletedReviews = await Review.deleteMany({});
-      result.reviewsCleared = deletedReviews.deletedCount;
-    }
-
-    // 12. Reset Procurement Hub (Suppliers & Purchases)
-    if (selections?.procurement) {
-      const Supplier = require('../models/Supplier');
-      const deletedSuppliers = await Supplier.deleteMany({});
-      const deletedPurchases = await Purchase.deleteMany({});
-      result.suppliersCleared = deletedSuppliers.deletedCount;
-      result.purchasesCleared = deletedPurchases.deletedCount;
-    }
-
-    // Always clear dashboard and analysis cache if anything reset
+    // Ensure dashboard cache clears
     if (selections?.dashboard || selections?.analysis || selections?.offlineBills || selections?.orders || selections?.procurement) {
       exports.clearDashboardCache();
     }
 
-    logger.info(`🚨 GRANULAR SYSTEM RESET COMPLETE:`, result);
+    // ── LAYER 4: AUDIT LOGGING WITH RESTORE PAYLOAD ──
+    const modulesResetList = Object.keys(selections).filter(k => selections[k]);
+    const graceExpiration = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes from now
 
-    return ApiResponse.success(res, result, 'Selected system data modules reset successfully!');
+    await AuditLog.create({
+      userId: req.user._id,
+      action: 'DATA_RESET',
+      module: 'SYSTEM',
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+      modulesReset: modulesResetList,
+      documentsCounts: shadowStats,
+      backupPath: backupResult.backupPath,
+      canRestoreUntil: graceExpiration,
+      details: { timestamp: timestampStr, selections }
+    });
+
+    logger.info(`✅ GRANULAR SYSTEM RESET COMPLETE (Soft Delete):`, shadowStats);
+
+    return ApiResponse.success(res, shadowStats, 'System data safely moved to backup shadow collections. You have 30 minutes to undo this action.');
+  } catch (error) { next(error); }
+};
+
+exports.getSyncIntegrityStats = async (req, res, next) => {
+  try {
+    const mongoose = require('mongoose');
+    const db = mongoose.connection.db;
+    
+    const collectionsToCheck = ['products', 'inventories', 'orders', 'bills', 'categories'];
+    const integrityReport = {};
+    
+    for (const collName of collectionsToCheck) {
+      try {
+        const stats = await db.command({ collStats: collName });
+        const count = await db.collection(collName).countDocuments();
+        
+        integrityReport[collName] = {
+          count,
+          indexes: stats.nindexes,
+          storageSizeKB: (stats.storageSize / 1024).toFixed(2),
+          indexSizeKB: (stats.totalIndexSize / 1024).toFixed(2),
+          hasOrphanedIndexes: count === 0 && stats.nindexes > 1
+        };
+      } catch (err) {
+        integrityReport[collName] = { error: err.message };
+      }
+    }
+    
+    return ApiResponse.success(res, integrityReport);
   } catch (error) { next(error); }
 };

@@ -8,6 +8,7 @@ const { optionalAuth } = require('../middlewares/auth');
 r.post('/create', optionalAuth, orderController.createOrder);
 r.post('/reserve', optionalAuth, orderController.reserveStock);
 r.post('/verify-payment', optionalAuth, orderController.verifyPayment);
+r.post('/:orderId/payment-failed', optionalAuth, orderController.handlePaymentFailed);
 r.get('/my-orders', protect, orderController.getUserOrders);
 r.get('/all', protect, isAdmin, orderController.getAllOrders);
 r.get('/:id', protect, orderController.getOrder);

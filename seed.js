@@ -5,7 +5,10 @@ const Category = require('./src/models/Category');
 const Product = require('./src/models/Product');
 const User = require('./src/models/User');
 const Settings = require('./src/models/Settings');
+const SyncService = require('./src/services/sync.service');
+const stockService = require('./src/services/stockService');
 const Inventory = require('./src/models/Inventory');
+const StockMovement = require('./src/models/StockMovement');
 
 const CATEGORIES = [
   { name: 'Shirts', slug: 'shirts', description: 'Formal and casual shirts', displayOrder: 1 },
@@ -287,8 +290,9 @@ async function seed() {
     Product.deleteMany({}),
     Settings.deleteMany({}),
     Inventory.deleteMany({}),
+    StockMovement.deleteMany({}),
   ]);
-  console.log('🗑️  Cleared existing categories, products, settings, inventory');
+  console.log('🗑️  Cleared existing categories, products, settings, inventory, and stock movements');
 
   // Seed categories
   const cats = await Category.insertMany(CATEGORIES);
@@ -296,43 +300,44 @@ async function seed() {
   const catMap = {};
   cats.forEach(c => { catMap[c.slug] = c._id; });
 
-  // Seed products and inventory
+  // Seed products
   let created = 0;
   for (const p of SAMPLE_PRODUCTS) {
     const { categorySlug, ...productData } = p;
     const catId = catMap[categorySlug];
     if (!catId) { console.log(`⚠️  Category not found: ${categorySlug}`); continue; }
     
-    // Create product
-    const createdProduct = await Product.create({ ...productData, category: catId });
-    created++;
-
-    // Seed corresponding inventory for each variant of this product
-    if (productData.variants && productData.variants.length > 0) {
-      for (const variant of productData.variants) {
-        const variantSku = variant.sku || `${createdProduct.sku}-${variant.size}-${variant.color.replace(/\s+/g, '')}`;
-        await Inventory.create({
-          productName: createdProduct.name,
-          category: categorySlug.toUpperCase(),
-          color: variant.color || '',
-          size: variant.size,
-          sku: variantSku.toUpperCase(),
-          productRef: createdProduct._id,
-          totalStock: variant.stock || 20,
-          availableStock: variant.stock || 20,
-          purchasePrice: createdProduct.costPrice || 200,
-          sellingPrice: createdProduct.sellingPrice || 599,
-          onlineEnabled: true,
-          offlineEnabled: true,
-          isDeleted: false
-        });
-      }
+    // Map initial `stock` property of variants to `available` and `totalStock` so Mongoose saves them
+    if (productData.variants) {
+      productData.variants = productData.variants.map(v => ({
+        ...v,
+        available: v.stock || 0,
+        totalStock: v.stock || 0
+      }));
     }
-  }
-  console.log(`✅ Seeded ${created} products with their matching inventory items`);
 
-  // Delete old default admin to completely clean it out
-  await User.deleteOne({ email: 'admin@magizhchi.com' });
+    const product = await Product.create({ ...productData, category: catId });
+
+    // Sync variants to the Inventory collection
+    await SyncService.syncProfileToInventory(product._id, product.toObject());
+
+    // Sync product stock summary (which aggregates availableStock back to product)
+    await stockService.syncProductStockSummary(product._id);
+
+    created++;
+  }
+  console.log(`✅ Seeded ${created} products and initialized inventory balances`);
+
+  // Delete old default admin to completely clean it out, plus any conflicting admin emails or phones
+  await User.deleteMany({ 
+    $or: [
+      { email: 'admin@magizhchi.com' },
+      { email: 'xavierbritto16@gmail.com' },
+      { email: 'magizhchigarmentsthanjavur@gmail.com' },
+      { phone: '9344881275' },
+      { phone: '7358885452' }
+    ]
+  });
 
   // Seed Admin 1 (Xavier Britto)
   const existingAdmin1 = await User.findOne({ email: 'xavierbritto16@gmail.com' });
@@ -341,15 +346,15 @@ async function seed() {
       name: 'Xavier Britto',
       email: 'xavierbritto16@gmail.com',
       phone: '9344881275',
-      password: 'Lourdu@110706',
+      password: '12345678',
       role: 'admin',
       isVerified: true,
     });
-    console.log('✅ Admin 1 created: xavierbritto16@gmail.com / Lourdu@110706');
+    console.log('✅ Admin 1 created: xavierbritto16@gmail.com / 12345678');
   } else {
     // Make sure credentials / phone match perfectly
     existingAdmin1.phone = '9344881275';
-    existingAdmin1.password = 'Lourdu@110706';
+    existingAdmin1.password = '12345678';
     existingAdmin1.role = 'admin';
     await existingAdmin1.save();
     console.log('✅ Admin 1 updated/synced successfully');
@@ -416,7 +421,7 @@ async function seed() {
   console.log('\n🎉 Database seed complete!\n');
   console.log('────────────────────────────────────────────────────────────────────────');
   console.log('Admin 1 Login: xavierbritto16@gmail.com OR 9344881275');
-  console.log('Password     : Lourdu@110706');
+  console.log('Password     : 12345678');
   console.log('Admin 2 Login: magizhchigarmentsthanjavur@gmail.com OR 7358885452');
   console.log('Password     : 12345678');
   console.log('Staff Login  : staff@magizhchi.com');

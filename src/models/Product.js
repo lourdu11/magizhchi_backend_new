@@ -59,6 +59,7 @@ const productSchema = new mongoose.Schema(
     isTrending: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },
     isDeleted: { type: Boolean, default: false },
+    isArchived: { type: Boolean, default: false, index: true },
     deletedAt: { type: Date },
     archivedAt: { type: Date },
     archivedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -170,12 +171,12 @@ productSchema.index({ isDeleted: 1 });
 productSchema.index({ createdAt: -1 });
 // ── HIGH-PERFORMANCE COMPOUND INDEXES ────────────────
 // Admin product list: most common query pattern
-productSchema.index({ isDeleted: 1, isActive: 1, createdAt: -1 });
+productSchema.index({ isDeleted: 1, isArchived: 1, isActive: 1, createdAt: -1 });
 // POS/Billing product fetch
-productSchema.index({ isBillingProduct: 1, isDeleted: 1, isActive: 1 });
+productSchema.index({ isBillingProduct: 1, isDeleted: 1, isArchived: 1, isActive: 1 });
 // Online storefront fetch
-productSchema.index({ isOnlineProduct: 1, isDeleted: 1, isActive: 1, createdAt: -1 });
+productSchema.index({ isOnlineProduct: 1, isDeleted: 1, isArchived: 1, isActive: 1, createdAt: -1 });
 // Category-filtered queries
-productSchema.index({ category: 1, isDeleted: 1, isActive: 1, createdAt: -1 });
+productSchema.index({ category: 1, isDeleted: 1, isArchived: 1, isActive: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Product', productSchema);

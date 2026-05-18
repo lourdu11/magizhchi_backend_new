@@ -14,6 +14,7 @@ const authLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => process.env.NODE_ENV !== 'production' || req.ip === '::1' || req.ip === '127.0.0.1',
   message: { success: false, message: 'Too many authentication attempts. Try again in 15 minutes.' },
 });
 

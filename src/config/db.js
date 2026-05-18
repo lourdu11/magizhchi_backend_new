@@ -5,16 +5,22 @@ const connectDB = async (retryCount = 0) => {
   const MAX_RETRIES = 5;
   try {
     let uri = process.env.MONGODB_URI;
+    const isLocal = uri.includes('localhost') || uri.includes('127.0.0.1');
 
-    const conn = await mongoose.connect(uri, {
-      serverSelectionTimeoutMS: 30000, // 30s for cloud stability
+    const options = {
+      serverSelectionTimeoutMS: 30000, // 30s for stability
       socketTimeoutMS: 60000,         // 60s for heavy aggregations
       maxPoolSize: 50,                // Higher concurrency
       minPoolSize: 5,                 // Keep some connections alive
       heartbeatFrequencyMS: 2000,     // Detect disconnects faster
-      retryWrites: true,
-      w: 'majority'
-    });
+    };
+
+    if (!isLocal) {
+      options.retryWrites = true;
+      options.w = 'majority';
+    }
+
+    const conn = await mongoose.connect(uri, options);
     logger.info(`✅ MongoDB Connected: ${conn.connection.host}`);
   } catch (error) {
     logger.error(`❌ MongoDB Connection Error (Attempt ${retryCount + 1}): ${error.message}`);

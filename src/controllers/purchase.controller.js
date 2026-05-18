@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Purchase = require('../models/Purchase');
+const { startTransactionSession } = require('../utils/transaction');
 const Supplier = require('../models/Supplier');
 const Inventory = require('../models/Inventory');
 const StockMovement = require('../models/StockMovement');
@@ -163,8 +164,8 @@ exports.updatePurchase = async (req, res, next) => {
 
     const { supplierId, supplierName, billNumber, paymentStatus, status, paidAmount, purchaseDate, notes, items, billImage } = req.body;
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    const tx = await startTransactionSession();
+    const session = tx.session;
 
     try {
       // 1. Rollback old stock if it was already received
@@ -273,14 +274,14 @@ exports.updatePurchase = async (req, res, next) => {
       }
     }
 
-    await session.commitTransaction();
+    await tx.commitTransaction();
     clearDashboardCache();
     return ApiResponse.success(res, { purchase: updatedPurchase }, 'Purchase updated and synchronized successfully');
   } catch (error) { 
-    if (session) await session.abortTransaction();
+    await tx.abortTransaction();
     next(error); 
   } finally {
-    if (session) session.endSession();
+    await tx.endSession();
   }
 };
 
@@ -500,8 +501,8 @@ exports.restorePurchase = async (req, res, next) => {
       return ApiResponse.error(res, 'This purchase is already active', 400);
     }
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    const tx = await startTransactionSession();
+    const session = tx.session;
 
     try {
       // 1. Un-archive Purchase
@@ -525,14 +526,14 @@ exports.restorePurchase = async (req, res, next) => {
       // 3. Re-sync to Catalog & Inventory
       await SyncService.syncPurchaseToCatalog(purchase._id, req.user._id, session);
 
-      await session.commitTransaction();
+      await tx.commitTransaction();
       clearDashboardCache();
       return ApiResponse.success(res, { purchase }, 'Purchase restored and stock synchronized successfully');
     } catch (err) {
-      await session.abortTransaction();
+      await tx.abortTransaction();
       throw err;
     } finally {
-      session.endSession();
+      await tx.endSession();
     }
   } catch (error) { next(error); }
 };

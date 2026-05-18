@@ -19,6 +19,7 @@ const ApiResponse = require('../utils/apiResponse');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const logger = require('../utils/logger');
+const { startTransactionSession } = require('../utils/transaction');
 
 exports.reserveStock = async (req, res, next) => {
   try {
@@ -49,8 +50,8 @@ exports.reserveStock = async (req, res, next) => {
 
 // POST /orders/create
 exports.createOrder = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  const tx = await startTransactionSession();
+  const session = tx.session;
   try {
     const { items, shippingAddress, billingAddress, paymentMethod, couponCode, notes, guestDetails } = req.body;
     
@@ -123,7 +124,7 @@ exports.createOrder = async (req, res, next) => {
         for (const selection of item.comboSelections) {
           const stock = await getAggregateStock(selection.productRef, selection.productName, selection.size, selection.color);
           if (!stock) throw { message: `Inventory not found for ${selection.productName} (${selection.size}/${selection.color})`, statusCode: 404 };
-          if (stock.totalAvailable < qty) throw { message: `Insufficient stock for ${selection.productName} in bundle`, statusCode: 400 };
+          if (stock.totalAvailable < qty) throw { message: `Insufficient stock for ${selection.productName} in bundle. Available: ${stock.totalAvailable}`, statusCode: 400 };
           
           selectionsWithInv.push({
             ...selection,
@@ -146,7 +147,7 @@ exports.createOrder = async (req, res, next) => {
       else {
         const stock = await getAggregateStock(product._id, product.name, item.size, item.color);
         if (!stock) throw { message: `Inventory not found for ${product.name} (${item.size}/${item.color})`, statusCode: 404 };
-        if (stock.totalAvailable < qty) throw { message: `Insufficient stock for ${product.name}`, statusCode: 400 };
+        if (stock.totalAvailable < qty) throw { message: `Insufficient stock for ${product.name}. Available: ${stock.totalAvailable}`, statusCode: 400 };
 
         orderItems.push({
           productId: product._id, productName: product.name,
@@ -195,12 +196,12 @@ exports.createOrder = async (req, res, next) => {
         for (const sel of item.comboSelections) {
            const inv = await Inventory.findById(sel.inventoryId).session(session);
            const available = (inv.totalStock || 0) - (inv.onlineSold || 0) - (inv.offlineSold || 0) - (inv.reservedStock || 0) + (inv.returned || 0) - (inv.damaged || 0);
-           if (!inv || available < item.quantity) throw { message: `Stock just ran out for ${sel.productName} in bundle.`, statusCode: 400 };
+           if (!inv || available < item.quantity) throw { message: `Stock just ran out for ${sel.productName} in bundle. Available: ${available}`, statusCode: 400 };
         }
       } else {
         const inv = await Inventory.findById(item.inventoryId).session(session);
         const available = (inv.totalStock || 0) - (inv.onlineSold || 0) - (inv.offlineSold || 0) - (inv.reservedStock || 0) + (inv.returned || 0) - (inv.damaged || 0);
-        if (!inv || available < item.quantity) throw { message: `Stock just ran out for ${item.productName}.`, statusCode: 400 };
+        if (!inv || available < item.quantity) throw { message: `Stock just ran out for ${item.productName}. Available: ${available}`, statusCode: 400 };
       }
     }
 
@@ -218,7 +219,8 @@ exports.createOrder = async (req, res, next) => {
     // 5. Generate Order Number
     const { getNextSequence } = require('../utils/generateNumbers');
     const seq = await getNextSequence('order', session);
-    const sequentialOrderNumber = `ORD-${String(seq).padStart(10, '0')}`;
+    const adjustedSeq = seq < 1001 ? seq + 1000 : seq;
+    const sequentialOrderNumber = `ORD-${adjustedSeq}`;
 
     const isGuest = !req.user || (req.user && req.user.name && req.user.name.startsWith('Guest_'));
     const finalGuestDetails = guestDetails || (isGuest && req.user ? {
@@ -247,12 +249,7 @@ exports.createOrder = async (req, res, next) => {
     for (const item of order.items) {
       const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
       for (const sel of selections) {
-         const result = await Inventory.findOneAndUpdate(
-           { _id: sel.inventoryId, availableStock: { $gte: item.quantity }, isDeleted: { $ne: true } },
-           { $inc: { availableStock: -item.quantity, reservedStock: item.quantity } },
-           { session, new: true }
-         );
-         if (!result) throw { message: `Stock collision for ${sel.productName}. Refresh and try again.`, statusCode: 400 };
+         const result = await StockService.reserveStock(sel.inventoryId, item.quantity, order._id, session);
          if (result.productRef) affectedProductIds.add(result.productRef.toString());
       }
       if (item.isCombo && item.productId) affectedProductIds.add(item.productId.toString());
@@ -272,8 +269,8 @@ exports.createOrder = async (req, res, next) => {
       await order.save({ session });
     }
 
-    await session.commitTransaction();
-    session.endSession();
+    await tx.commitTransaction();
+    await tx.endSession();
 
     // ── 8. POST-COMMIT GLOBAL SYNC ──
     const updatedStocks = [];
@@ -305,8 +302,8 @@ exports.createOrder = async (req, res, next) => {
 
     return ApiResponse.created(res, { order: { _id: order._id, orderNumber: order.orderNumber, totalAmount }, razorpayOrder });
   } catch (error) { 
-    await session.abortTransaction();
-    session.endSession();
+    await tx.abortTransaction();
+    await tx.endSession();
     if (error.name === 'ValidationError') {
       console.error('CRITICAL_ORDER_VAL_FAIL:', JSON.stringify(error.errors, null, 2));
     }
@@ -581,5 +578,31 @@ exports.updateReturnStatus = async (req, res, next) => {
 
     return ApiResponse.success(res, order, `Return ${status}`);
   } catch (error) { next(error); }
+};
+
+exports.handlePaymentFailed = async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return ApiResponse.notFound(res, 'Order not found');
+    }
+
+    if (order.paymentStatus === 'pending') {
+      logger.warn(`🛑 Payment failed/cancelled for Order ${order.orderNumber}. Rolling back stock.`);
+      const StockService = require('../services/stock.service');
+      await StockService.paymentFailureRollback(order._id);
+      
+      order.paymentStatus = 'failed';
+      order.orderStatus = 'cancelled';
+      order.cancelReason = 'Payment cancelled or failed at checkout';
+      order.statusHistory.push({ status: 'cancelled', updatedAt: new Date(), note: 'Payment cancelled or failed at checkout' });
+      await order.save();
+    }
+
+    return ApiResponse.success(res, { order: { orderNumber: order.orderNumber } }, 'Payment failure processed');
+  } catch (error) {
+    next(error);
+  }
 };
 

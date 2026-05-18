@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Bill = require('../models/Bill');
+const { startTransactionSession } = require('../utils/transaction');
 const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
 const User = require('../models/User');
@@ -16,15 +17,15 @@ const { getIO } = require('../utils/socket');
 
 // ── POST /bills ───────────────────────────────────────────────────────────────
 exports.createBill = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  const tx = await startTransactionSession();
+  const session = tx.session;
   try {
     const { idempotencyKey } = req.body;
     if (idempotencyKey) {
-      const existing = await Bill.findOne({ idempotencyKey }).session(session);
+      const existing = await (session ? Bill.findOne({ idempotencyKey }).session(session) : Bill.findOne({ idempotencyKey }));
       if (existing) {
-        await session.abortTransaction();
-        session.endSession();
+        await tx.abortTransaction();
+        await tx.endSession();
         return ApiResponse.success(res, { bill: existing, duplicate: true }, 'Bill already exists (idempotency)');
       }
     }
@@ -43,7 +44,7 @@ exports.createBill = async (req, res, next) => {
     }
 
     if (!items || items.length === 0) {
-      await session.abortTransaction();
+      await tx.abortTransaction();
       return ApiResponse.error(res, 'Bill must have at least one item', 400);
     }
 
@@ -83,13 +84,22 @@ exports.createBill = async (req, res, next) => {
     }).flat().filter(q => q.productName);
 
     const [productsBatch, inventoryBatch] = await Promise.all([
-      Product.find({ $or: [{ _id: { $in: productIds } }, { name: { $in: productNames.map(n => new RegExp('^' + n + '$', 'i')) } }] }).session(session),
-      Inventory.find({ 
-        $or: [
-          { _id: { $in: inventoryIds } },
-          ...inventoryQueryOr
-        ]
-      }).session(session)
+      session
+        ? Product.find({ $or: [{ _id: { $in: productIds } }, { name: { $in: productNames.map(n => new RegExp('^' + n + '$', 'i')) } }] }).session(session)
+        : Product.find({ $or: [{ _id: { $in: productIds } }, { name: { $in: productNames.map(n => new RegExp('^' + n + '$', 'i')) } }] }),
+      session
+        ? Inventory.find({ 
+            $or: [
+              { _id: { $in: inventoryIds } },
+              ...inventoryQueryOr
+            ]
+          }).session(session)
+        : Inventory.find({ 
+            $or: [
+              { _id: { $in: inventoryIds } },
+              ...inventoryQueryOr
+            ]
+          })
     ]);
 
     const productMap = new Map();
@@ -128,9 +138,15 @@ exports.createBill = async (req, res, next) => {
                       inventoryMap.get(`${sel.productName.toLowerCase()}|${sel.size}|Default`);
           }
           if (!invItem) {
-            await session.abortTransaction();
+            await tx.abortTransaction();
             return ApiResponse.error(res, `Component stock not found: ${sel.productName} (${sel.size})`, 404);
           }
+          const currentStock = (invItem.totalStock || 0) - (invItem.offlineSold || 0) - (invItem.onlineSold || 0) - (invItem.damaged || 0) + (invItem.returned || 0) - (invItem.reservedStock || 0);
+          // Allow negative stock for retail flex billing, shift burden to EOD reconciliation
+          // if (currentStock < item.quantity) {
+          //   await tx.abortTransaction();
+          //   return ApiResponse.error(res, `Insufficient stock for combo component: ${sel.productName}. Available: ${currentStock}`, 400);
+          // }
           selectionsWithInv.push({ ...sel, inventoryId: invItem._id });
         }
 
@@ -146,8 +162,8 @@ exports.createBill = async (req, res, next) => {
           quantity: item.quantity,
           price: priceInPaise,
           total: itemTotalInPaise,
-          taxableValue: itemTotalInPaise, // Combos often sold as single taxable unit or split; here we treat as unit
-          cgst: 0, sgst: 0 // Simplified tax for combo unit; can be refined
+          taxableValue: itemTotalInPaise,
+          cgst: 0, sgst: 0
         });
         subtotalInPaise += itemTotalInPaise;
       } else {
@@ -177,15 +193,35 @@ exports.createBill = async (req, res, next) => {
         }
 
         if (!invItem) {
-          await session.abortTransaction();
-          return ApiResponse.error(res, `Stock record not found for ${item.productName} (${itemSize}/${itemColor || 'Default'})`, 404);
+          // Self-healing: If inventory variant doesn't exist, create it on-the-fly with 0 stock!
+          if (product) {
+             invItem = await Inventory.create([{
+                productRef: product._id,
+                productName: product.name,
+                size: itemSize,
+                color: itemColor || 'Default',
+                sku: product.sku ? `${product.sku}-${itemSize.toUpperCase()}-${(itemColor || 'Default').toUpperCase()}` : `AUTO-${Date.now()}`,
+                sellingPrice: product.discountedPrice || product.sellingPrice || 0,
+                costPrice: product.costPrice || 0,
+                totalStock: 0,
+                offlineEnabled: true,
+                onlineEnabled: false
+             }], { session: tx.session }).then(r => r[0]);
+             
+             // Register in map for subsequent lookups in same batch
+             inventoryMap.set(invItem._id.toString(), invItem);
+          } else {
+             await tx.abortTransaction();
+             return ApiResponse.error(res, `Stock record not found for ${item.productName} (${itemSize}/${itemColor || 'Default'})`, 404);
+          }
         }
 
-        const currentStock = (invItem.totalStock || 0) - (invItem.offlineSold || 0) - (invItem.onlineSold || 0) - (invItem.damaged || 0) + (invItem.returned || 0);
-        if (currentStock < item.quantity) {
-          await session.abortTransaction();
-          return ApiResponse.error(res, `Insufficient stock for ${item.productName}. Available: ${currentStock}`, 400);
-        }
+        const currentStock = (invItem.totalStock || 0) - (invItem.offlineSold || 0) - (invItem.onlineSold || 0) - (invItem.damaged || 0) + (invItem.returned || 0) - (invItem.reservedStock || 0);
+        // Allow negative stock for retail flex billing, shift burden to EOD reconciliation
+        // if (currentStock < item.quantity) {
+        //   await tx.abortTransaction();
+        //   return ApiResponse.error(res, `Insufficient stock for ${item.productName}. Available: ${currentStock}`, 400);
+        // }
 
         const priceInPaise = Math.round((Number(item.price) || invItem.sellingPrice || product?.sellingPrice || 0) * 100);
         const itemTotalInPaise = priceInPaise * item.quantity;
@@ -224,11 +260,11 @@ exports.createBill = async (req, res, next) => {
 
     // TASK 10: Bill Number generation (Moved earlier for StockEngine reference)
     let billNumber = manualBillNumber;
-    if (!billNumber) {
-      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    if (!billNumber || billNumber.startsWith('OFFLINE-')) {
+      const currentYear = new Date().getFullYear();
       const { getNextSequence } = require('../utils/generateNumbers');
-      const seq = await getNextSequence(`BILL-${dateStr}`, session);
-      billNumber = `BILL-${dateStr}-MAG${String(seq).padStart(3, '0')}`;
+      const seq = await getNextSequence(`BILL-${currentYear}`, session);
+      billNumber = `MAG-${currentYear}-${String(seq).padStart(3, '0')}`;
     }
 
     // ── 3. RESERVE & COMMIT STOCK (Atomic Cascade) ──
@@ -239,51 +275,39 @@ exports.createBill = async (req, res, next) => {
       if (item.isCombo) {
         // Combo Stock Cascade: Decrement each component's inventory
         for (const sel of item.comboSelections || []) {
-          const result = await Inventory.findOneAndUpdate(
-            { 
-              _id: sel.inventoryId, 
-              availableStock: { $gte: item.quantity },
-              isDeleted: { $ne: true }
-            },
-            { 
-              $inc: { 
-                availableStock: -item.quantity, 
-                offlineSold: item.quantity 
-              } 
-            },
-            { session, new: true }
-          );
-          
-          if (!result) {
-            await session.abortTransaction();
-            return ApiResponse.error(res, `Insufficient stock for combo component: ${sel.productName}`, 400);
+          try {
+            const result = await StockService.commitDirectOfflineSale(
+              sel.inventoryId,
+              item.quantity,
+              billNumber,
+              billId,
+              req.user._id,
+              session
+            );
+            if (result.productRef) affectedProductIds.add(result.productRef.toString());
+          } catch (err) {
+            await tx.abortTransaction();
+            return ApiResponse.error(res, `Stock Error: ${err.message}`, 400);
           }
-          if (result.productRef) affectedProductIds.add(result.productRef.toString());
         }
         // Also add the combo product itself to sync list
         if (item.productId) affectedProductIds.add(item.productId.toString());
       } else {
         // Standalone Stock: Direct decrement
-        const result = await Inventory.findOneAndUpdate(
-          { 
-            _id: item.inventoryId, 
-            availableStock: { $gte: item.quantity },
-            isDeleted: { $ne: true }
-          },
-          { 
-            $inc: { 
-              availableStock: -item.quantity, 
-              offlineSold: item.quantity 
-            } 
-          },
-          { session, new: true }
-        );
-
-        if (!result) {
-          await session.abortTransaction();
-          return ApiResponse.error(res, `Insufficient stock for ${item.productName}`, 400);
+        try {
+          const result = await StockService.commitDirectOfflineSale(
+            item.inventoryId,
+            item.quantity,
+            billNumber,
+            billId,
+            req.user._id,
+            session
+          );
+          if (result.productRef) affectedProductIds.add(result.productRef.toString());
+        } catch (err) {
+          await tx.abortTransaction();
+          return ApiResponse.error(res, `Stock Error: ${err.message}`, 400);
         }
-        if (result.productRef) affectedProductIds.add(result.productRef.toString());
       }
     }
 
@@ -298,7 +322,7 @@ exports.createBill = async (req, res, next) => {
     // TASK 3: Global Discount Cap Check (Simplified: check if total discount % exceeds a reasonable threshold like 50% if not specified)
     const totalDiscountPercent = (discAmtInPaise / subtotalInPaise) * 100;
     if (totalDiscountPercent > 99 && discountType !== 'offer') {
-       await session.abortTransaction();
+       await tx.abortTransaction();
        return ApiResponse.error(res, 'Suspiciously high global discount. Use Offer mode for 100% off.', 400);
     }
 
@@ -307,7 +331,7 @@ exports.createBill = async (req, res, next) => {
 
     // Commission
     const actualSalesStaffId = salesStaffId || req.user._id;
-    const staff = await User.findById(actualSalesStaffId).session(session);
+    const staff = await (session ? User.findById(actualSalesStaffId).session(session) : User.findById(actualSalesStaffId));
     const commissionAmountInPaise = Math.round((totalAmountInPaise * (staff?.commissionRate || 0)) / 100);
 
     const [bill] = await Bill.create([{
@@ -332,11 +356,12 @@ exports.createBill = async (req, res, next) => {
       paymentDetails: paymentDetails || {},
       shopInfo,
       notes,
-    }], { session });
+      idempotencyKey: idempotencyKey || (manualBillNumber && manualBillNumber.startsWith('OFFLINE-') ? manualBillNumber : undefined),
+    }], session ? { session } : {});
 
 
-    await session.commitTransaction();
-    session.endSession();
+    await tx.commitTransaction();
+    await tx.endSession();
 
     // ── 5. POST-COMMIT GLOBAL SYNC & REAL-TIME BROADCAST ──
     const updatedStocks = [];
@@ -367,8 +392,8 @@ exports.createBill = async (req, res, next) => {
 
     return ApiResponse.created(res, { bill: populatedBill }, 'Bill saved successfully');
   } catch (error) { 
-    await session.abortTransaction();
-    session.endSession();
+    await tx.abortTransaction();
+    await tx.endSession();
     next(error); 
   }
 };
@@ -377,7 +402,7 @@ exports.createBill = async (req, res, next) => {
 exports.getBills = async (req, res, next) => {
   try {
     const { lastId, limit = 20, date, search } = req.query;
-    const query = { status: { $ne: 'voided' } };
+    const query = {};
     if (req.user.role === 'staff') query.staffId = req.user._id;
     if (date) {
       const start = new Date(date); start.setHours(0, 0, 0, 0);
@@ -387,6 +412,7 @@ exports.getBills = async (req, res, next) => {
     if (search) {
       query.$or = [
         { billNumber:              { $regex: search, $options: 'i' } },
+        { idempotencyKey:          { $regex: search, $options: 'i' } },
         { 'customerDetails.name':  { $regex: search, $options: 'i' } },
         { 'customerDetails.phone': { $regex: search, $options: 'i' } },
       ];
@@ -502,22 +528,22 @@ exports.resendReceipt = async (req, res, next) => {
 
 // ── DELETE /bills/:id ─────────────────────────────────────────────────────────
 exports.deleteBill = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  const tx = await startTransactionSession();
+  const session = tx.session;
   
   try {
     const { reason: userReason } = req.body;
-    const bill = await Bill.findById(req.params.id).session(session);
+    const bill = await (session ? Bill.findById(req.params.id).session(session) : Bill.findById(req.params.id));
     
     if (!bill) {
-      await session.abortTransaction();
-      session.endSession();
+      await tx.abortTransaction();
+      await tx.endSession();
       return ApiResponse.notFound(res, 'Bill not found');
     }
 
     if (bill.status === 'voided') {
-      await session.abortTransaction();
-      session.endSession();
+      await tx.abortTransaction();
+      await tx.endSession();
       return ApiResponse.error(res, 'This bill is already voided', 400);
     }
 
@@ -543,33 +569,33 @@ exports.deleteBill = async (req, res, next) => {
     bill.voidedReason = userReason || 'No reason provided';
     bill.voidedBy = req.user._id;
     bill.voidedAt = new Date();
-    await bill.save({ session });
+    await (session ? bill.save({ session }) : bill.save());
     
-    await session.commitTransaction();
-    session.endSession();
+    await tx.commitTransaction();
+    await tx.endSession();
 
     logAudit({ req, action: 'VOID_BILL', module: 'BILLING', resourceId: bill._id, details: { billNumber: bill.billNumber, reason: userReason } });
     return ApiResponse.success(res, null, 'Bill voided and stock restored');
   } catch (error) { 
-    await session.abortTransaction();
-    session.endSession();
+    await tx.abortTransaction();
+    await tx.endSession();
     next(error); 
   }
 };
 
 // ── PUT /bills/:id ─────────────────────────────────────────────────────────────
 exports.updateBill = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  const tx = await startTransactionSession();
+  const session = tx.session;
   try {
-    const bill = await Bill.findById(req.params.id).session(session);
+    const bill = await (session ? Bill.findById(req.params.id).session(session) : Bill.findById(req.params.id));
     if (!bill) {
-      await session.abortTransaction();
+      await tx.abortTransaction();
       return ApiResponse.notFound(res, 'Bill not found');
     }
 
     if (bill.status === 'voided') {
-      await session.abortTransaction();
+      await tx.abortTransaction();
       return ApiResponse.error(res, 'Cannot edit a voided bill', 400);
     }
 
@@ -580,7 +606,7 @@ exports.updateBill = async (req, res, next) => {
     } = req.body;
 
     if (!items || items.length === 0) {
-      await session.abortTransaction();
+      await tx.abortTransaction();
       return ApiResponse.error(res, 'Bill must have at least one item', 400);
     }
 
@@ -600,6 +626,9 @@ exports.updateBill = async (req, res, next) => {
         }
       }
     }
+
+    const billItems = [];
+    let subtotalInPaise = 0;
 
     // ─── OPTIMIZED BATCH FETCH ───
     const itemsToFetch = [];
@@ -621,8 +650,12 @@ exports.updateBill = async (req, res, next) => {
     })).filter(q => q.productName);
 
     const [productsBatch, inventoryBatch] = await Promise.all([
-      Product.find({ $or: [{ _id: { $in: productIds } }, { name: { $in: productNames.map(n => new RegExp('^' + n + '$', 'i')) } }] }).session(session),
-      Inventory.find({ $or: inventoryQueryOr }).session(session)
+      session
+        ? Product.find({ $or: [{ _id: { $in: productIds } }, { name: { $in: productNames.map(n => new RegExp('^' + n + '$', 'i')) } }] }).session(session)
+        : Product.find({ $or: [{ _id: { $in: productIds } }, { name: { $in: productNames.map(n => new RegExp('^' + n + '$', 'i')) } }] }),
+      session
+        ? Inventory.find({ $or: inventoryQueryOr }).session(session)
+        : Inventory.find({ $or: inventoryQueryOr })
     ]);
 
     const productMap = new Map();
@@ -645,8 +678,13 @@ exports.updateBill = async (req, res, next) => {
           const invKey = `${sel.productName.toLowerCase()}|${sel.size}|${sel.color}`;
           const invItem = inventoryMap.get(invKey);
           if (!invItem) {
-            await session.abortTransaction();
+            await tx.abortTransaction();
             return ApiResponse.error(res, `Component stock not found: ${sel.productName}`, 404);
+          }
+          const currentStock = (invItem.totalStock || 0) - (invItem.offlineSold || 0) - (invItem.onlineSold || 0) - (invItem.damaged || 0) + (invItem.returned || 0) - (invItem.reservedStock || 0);
+          if (currentStock < item.quantity) {
+            await tx.abortTransaction();
+            return ApiResponse.error(res, `Insufficient stock for combo component: ${sel.productName}. Available: ${currentStock}`, 400);
           }
           selectionsWithInv.push({ ...sel, inventoryId: invItem._id });
         }
@@ -684,13 +722,13 @@ exports.updateBill = async (req, res, next) => {
         const invItem = inventoryMap.get(invKey);
 
         if (!invItem) {
-          await session.abortTransaction();
+          await tx.abortTransaction();
           return ApiResponse.error(res, `Stock record not found for ${item.productName}`, 404);
         }
 
-        const currentStock = (invItem.totalStock || 0) - (invItem.offlineSold || 0) - (invItem.onlineSold || 0);
+        const currentStock = (invItem.totalStock || 0) - (invItem.offlineSold || 0) - (invItem.onlineSold || 0) - (invItem.damaged || 0) + (invItem.returned || 0) - (invItem.reservedStock || 0);
         if (currentStock < item.quantity) {
-          await session.abortTransaction();
+          await tx.abortTransaction();
           return ApiResponse.error(res, `Insufficient stock for ${item.productName}. Available: ${currentStock}`, 400);
         }
 
@@ -734,16 +772,16 @@ exports.updateBill = async (req, res, next) => {
       const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
       for (const target of selections) {
         try {
-          await StockService.commitOfflineSale(
+          await StockService.commitDirectOfflineSale(
             target.inventoryId, 
             item.quantity, 
             bill.billNumber, 
-            bill._id, // Added missing billId
+            bill._id,
             req.user._id, 
             session
           );
         } catch (err) {
-          await session.abortTransaction();
+          await tx.abortTransaction();
           return ApiResponse.error(res, `Stock Error: ${err.message}`, 400);
         }
       }
@@ -760,7 +798,7 @@ exports.updateBill = async (req, res, next) => {
     // TASK 3: Global Discount Cap Check
     const totalDiscountPercent = (discAmtInPaise / subtotalInPaise) * 100;
     if (totalDiscountPercent > 99 && discountType !== 'offer') {
-       await session.abortTransaction();
+       await tx.abortTransaction();
        return ApiResponse.error(res, 'Suspiciously high global discount. Use Offer mode for 100% off.', 400);
     }
 
@@ -768,7 +806,7 @@ exports.updateBill = async (req, res, next) => {
     const gstAmountInPaise = billItems.reduce((sum, i) => sum + (i.cgst + i.sgst), 0);
 
     const actualSalesStaffId = salesStaffId || bill.salesStaffId || req.user._id;
-    const staff = await User.findById(actualSalesStaffId).session(session);
+    const staff = await (session ? User.findById(actualSalesStaffId).session(session) : User.findById(actualSalesStaffId));
     const commissionAmountInPaise = Math.round((totalAmountInPaise * (staff?.commissionRate || 0)) / 100);
 
     // 3. UPDATE BILL FIELDS
@@ -790,9 +828,9 @@ exports.updateBill = async (req, res, next) => {
     bill.shopInfo = shopInfo;
     bill.notes = notes || bill.notes;
 
-    await bill.save({ session });
-    await session.commitTransaction();
-    session.endSession();
+    await (session ? bill.save({ session }) : bill.save());
+    await tx.commitTransaction();
+    await tx.endSession();
 
     await bill.populate('items.productId', 'name images sku');
 
@@ -806,8 +844,8 @@ exports.updateBill = async (req, res, next) => {
 
     return ApiResponse.success(res, { bill }, 'Bill updated successfully');
   } catch (error) { 
-    await session.abortTransaction();
-    session.endSession();
+    await tx.abortTransaction();
+    await tx.endSession();
     next(error); 
   }
 };

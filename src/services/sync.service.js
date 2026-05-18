@@ -10,6 +10,7 @@ const { getIO } = require('../utils/socket');
 const { logAudit } = require('../utils/auditLogger');
 const logger = require('../utils/logger');
 const slugify = require('slugify');
+const { deleteCloudinaryAsset } = require('../utils/cloudinaryHelper');
 
 /**
  * Enterprise-Grade Synchronization Service
@@ -35,6 +36,30 @@ class SyncService {
     }
 
     logger.warn(`[SyncService] PERMANENT PURGE initiated for: ${product.name} by User: ${userId}`);
+
+    // 0. Cloudinary Media Asset Cleanup
+    const imageUrls = [];
+    if (product.thumbnail) imageUrls.push(product.thumbnail);
+    if (product.images && product.images.length > 0) imageUrls.push(...product.images);
+    if (product.variants && product.variants.length > 0) {
+      product.variants.forEach(v => {
+        if (v.images && v.images.length > 0) imageUrls.push(...v.images);
+      });
+    }
+
+    const linkedInventories = await Inventory.find({ productRef: productId });
+    linkedInventories.forEach(inv => {
+      if (inv.images && inv.images.length > 0) imageUrls.push(...inv.images);
+      if (inv.laptopImage) imageUrls.push(inv.laptopImage);
+      if (inv.tabletImage) imageUrls.push(inv.tabletImage);
+      if (inv.mobileImage) imageUrls.push(inv.mobileImage);
+      if (inv.thumbnail) imageUrls.push(inv.thumbnail);
+    });
+
+    const uniqueUrls = [...new Set(imageUrls)].filter(Boolean);
+    for (const url of uniqueUrls) {
+      deleteCloudinaryAsset(url).catch(err => logger.error(`[Cloudinary Cleanup Error in Purge] ${err.message}`));
+    }
 
     // 1. Delete Inventory Records
     await Inventory.deleteMany({ productRef: productId });

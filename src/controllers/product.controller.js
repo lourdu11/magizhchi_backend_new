@@ -12,13 +12,14 @@ const mongoose = require('mongoose');
 const logger = require('../utils/logger');
 const SyncService = require('../services/sync.service');
 const Inventory = require('../models/Inventory');
+const { startTransactionSession } = require('../utils/transaction');
 
 // GET /products (Public/POS)
 exports.getProducts = async (req, res, next) => {
   try {
     const { lastId, limit = 20, category, search, minPrice, maxPrice, size, sort = '-createdAt', isFeatured, isBestSeller, isNewArrival, isPOS, isAdmin, showDeleted } = req.query;
 
-    const query = { isActive: { $ne: false }, isDeleted: { $ne: true } };
+    const query = { isActive: { $ne: false }, isDeleted: { $ne: true }, isArchived: { $ne: true } };
 
     if (showDeleted === 'true') {
        delete query.isDeleted;
@@ -28,6 +29,7 @@ exports.getProducts = async (req, res, next) => {
     if (isAdmin === 'true') {
        delete query.isActive; 
     } else if (isPOS === 'true') {
+       delete query.isActive;
        query.isBillingProduct = true;
     } else {
        query.isOnlineProduct = true;
@@ -38,8 +40,14 @@ exports.getProducts = async (req, res, next) => {
        if (mongoose.Types.ObjectId.isValid(category)) {
           query.category = category;
        } else {
-          const cat = await Category.findOne({ slug: category });
+          const cat = await Category.findOne({
+             $or: [
+                { slug: category.toLowerCase() },
+                { name: { $regex: new RegExp(`^${category}$`, 'i') } }
+             ]
+          });
           if (cat) query.category = cat._id;
+          else query.category = new mongoose.Types.ObjectId(); // Return empty if not found
        }
     }
 
@@ -128,8 +136,15 @@ exports.getProducts = async (req, res, next) => {
 // GET /products/admin (Admin Profile Center)
 exports.getAdminProducts = async (req, res, next) => {
   try {
-    const { lastId, category, search, sort = 'newest', limit = 100, showDeleted } = req.query;
-    const query = { isDeleted: showDeleted === 'true' ? true : { $ne: true } };
+    const { lastId, category, search, sort = 'newest', limit = 100, showDeleted, showArchived } = req.query;
+    const query = { isDeleted: { $ne: true } };
+
+    const filterArchived = showDeleted === 'true' || showArchived === 'true';
+    if (filterArchived) {
+      query.isArchived = true;
+    } else {
+      query.isArchived = { $ne: true };
+    }
 
     if (category) query.category = category;
     if (search) {
@@ -280,6 +295,11 @@ exports.getProduct = async (req, res, next) => {
       query.slug = slug;
     }
 
+    const { isAdmin } = req.query;
+    if (isAdmin !== 'true') {
+      query.isArchived = { $ne: true };
+    }
+
     if (isPOS !== 'true') query.isActive = true;
 
     const product = await Product.findOne(query)
@@ -315,7 +335,8 @@ exports.searchProducts = async (req, res, next) => {
         { name: { $regex: q, $options: 'i' } },
         { sku: { $regex: q, $options: 'i' } }
       ],
-      isDeleted: { $ne: true }
+      isDeleted: { $ne: true },
+      isArchived: { $ne: true }
     };
 
     if (isPOS === 'true') {
@@ -348,8 +369,8 @@ exports.searchProducts = async (req, res, next) => {
 
 // POST /products (Admin)
 exports.createProduct = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  const tx = await startTransactionSession();
+  const session = tx.session;
   try {
     const data = req.body;
     if (data.variants && Array.isArray(data.variants)) {
@@ -362,7 +383,7 @@ exports.createProduct = async (req, res, next) => {
       });
     }
     if (!data.name) {
-      await session.abortTransaction();
+      await tx.abortTransaction();
       return ApiResponse.error(res, 'Product name is required', 400);
     }
     
@@ -374,7 +395,7 @@ exports.createProduct = async (req, res, next) => {
 
     // Generate unique slug
     let slug = slugify(data.name, { lower: true, strict: true });
-    const slugExists = await Product.findOne({ slug }).session(session);
+    const slugExists = await (session ? Product.findOne({ slug }).session(session) : Product.findOne({ slug }));
     if (slugExists) {
       slug = `${slug}-${Math.random().toString(36).substring(2, 7)}`;
     }
@@ -382,32 +403,26 @@ exports.createProduct = async (req, res, next) => {
 
     if (!data.sku) data.sku = generateSKU(data.category);
 
-    const product = await Product.create([data], { session });
+    const product = await Product.create([data], session ? { session } : {});
     const newProduct = product[0];
 
     // NEW: Trigger immediate inventory sync for initial variants if any
     await SyncService.syncProfileToInventory(newProduct._id, data, session);
 
-    await session.commitTransaction();
+    await tx.commitTransaction();
     return ApiResponse.created(res, newProduct, 'Product Profile Created Successfully');
   } catch (error) { 
-    try {
-      if (session && session.inTransaction && session.inTransaction()) {
-        await session.abortTransaction();
-      }
-    } catch (abortErr) {
-      console.error('Failed to abort transaction in createProduct:', abortErr.message);
-    }
+    await tx.abortTransaction();
     next(error); 
   } finally {
-    session.endSession();
+    await tx.endSession();
   }
 };
 
 // POST /products/with-procurement (Admin)
 exports.createProductWithProcurement = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  const tx = await startTransactionSession();
+  const session = tx.session;
   try {
     const { productData, procurementData } = req.body;
     if (productData && productData.variants && Array.isArray(productData.variants)) {
@@ -421,21 +436,21 @@ exports.createProductWithProcurement = async (req, res, next) => {
     }
     
     if (!productData.name) {
-       await session.abortTransaction();
+       await tx.abortTransaction();
        return ApiResponse.error(res, 'Product name is required', 400);
     }
 
     // 1. Create Product Profile
     // Generate unique slug
     let slug = slugify(productData.name, { lower: true, strict: true });
-    const slugExists = await Product.findOne({ slug }).session(session);
+    const slugExists = await (session ? Product.findOne({ slug }).session(session) : Product.findOne({ slug }));
     if (slugExists) {
       slug = `${slug}-${Math.random().toString(36).substring(2, 7)}`;
     }
     productData.slug = slug;
     if (!productData.sku) productData.sku = generateSKU(productData.category);
 
-    const product = await Product.create([productData], { session });
+    const product = await Product.create([productData], session ? { session } : {});
     const newProduct = product[0];
 
     // 2. Create Purchase Bill if data exists
@@ -469,7 +484,7 @@ exports.createProductWithProcurement = async (req, res, next) => {
           performedBy: req.user._id
        };
 
-       const purchase = await Purchase.create([purchaseData], { session });
+       const purchase = await Purchase.create([purchaseData], session ? { session } : {});
        const newPurchase = purchase[0];
 
        // 3. Process Purchase (Sync to Inventory)
@@ -479,27 +494,21 @@ exports.createProductWithProcurement = async (req, res, next) => {
        await SyncService.syncProfileToInventory(newProduct._id, productData, session);
     }
 
-    await session.commitTransaction();
+    await tx.commitTransaction();
     return ApiResponse.created(res, newProduct, 'Product Profile and Procurement recorded successfully');
 
   } catch (error) {
-    try {
-      if (session && session.inTransaction && session.inTransaction()) {
-        await session.abortTransaction();
-      }
-    } catch (abortErr) {
-      console.error('Failed to abort transaction in createProductWithProcurement:', abortErr.message);
-    }
+    await tx.abortTransaction();
     next(error);
   } finally {
-    session.endSession();
+    await tx.endSession();
   }
 };
 
 // PATCH /products/:id (Admin)
 exports.updateProduct = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  const tx = await startTransactionSession();
+  const session = tx.session;
   try {
     const { id } = req.params;
     const updateData = req.body;
@@ -513,19 +522,19 @@ exports.updateProduct = async (req, res, next) => {
       });
     }
 
-    const product = await Product.findById(id).session(session);
+    const product = await (session ? Product.findById(id).session(session) : Product.findById(id));
     if (!product) {
-      await session.abortTransaction();
+      await tx.abortTransaction();
       return ApiResponse.notFound(res, 'Product not found');
     }
 
     Object.assign(product, updateData);
-    await product.save({ session });
+    await (session ? product.save({ session }) : product.save());
     
     // Cascade changes to Inventory
     await SyncService.syncProfileToInventory(id, updateData, session);
 
-    await session.commitTransaction();
+    await tx.commitTransaction();
 
     try {
       const { getIO } = require('../utils/socket');
@@ -539,32 +548,126 @@ exports.updateProduct = async (req, res, next) => {
 
     return ApiResponse.success(res, product);
   } catch (error) { 
-    try {
-      if (session && session.inTransaction && session.inTransaction()) {
-        await session.abortTransaction();
-      }
-    } catch (abortErr) {
-      console.error('Failed to abort transaction in updateProduct:', abortErr.message);
-    }
+    await tx.abortTransaction();
     next(error); 
   } finally {
-    session.endSession();
+    await tx.endSession();
   }
 };
 
 // DELETE /products/:id (Admin)
 exports.deleteProduct = async (req, res, next) => {
+  const { startTransactionSession } = require('../utils/transaction');
+  const { deleteCloudinaryAsset } = require('../utils/cloudinaryHelper');
+  const Order = require('../models/Order');
+  const Bill = require('../models/Bill');
+  const { getIO } = require('../utils/socket');
+  const io = getIO();
+
+  const { id } = req.params;
+  const tx = await startTransactionSession();
+
   try {
-    // ENTERPRISE SYNC: Protected archival with reference checking
-    const { id } = req.params;
-    const result = await SyncService.archiveProduct(id, req.user._id, req.body?.reason || 'Manual Admin Archival');
-    
-    return ApiResponse.success(res, { 
-       archived: true, 
-       mode: result.mode,
-       message: 'Product and variants archived with history protection' 
+    const product = await Product.findById(id).session(tx.session);
+    if (!product) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.notFound(res, 'Product not found');
+    }
+
+    // 1. Referential Integrity Shield: Check if this item is in order/billing history
+    const hasOrders = await Order.exists({ 'items.productId': id }).session(tx.session);
+    const hasBills = await Bill.exists({ 'items.productId': id }).session(tx.session);
+
+    if (hasOrders || hasBills) {
+      // Perform Soft-Delete (Archival) to protect historical financial integrity
+      logger.info(`[ProductController] Soft-deleting/Archiving product ${product.name} (Linked to Sales History)`);
+      
+      product.isArchived = true;
+      product.isActive = false;
+      product.archivedAt = new Date();
+      product.archivedBy = req.user._id;
+      await product.save({ session: tx.session });
+
+      // Disable associated inventory records
+      await Inventory.updateMany(
+        { productRef: id },
+        { 
+          $set: { 
+            isArchived: true, 
+            archivedAt: new Date(), 
+            onlineEnabled: false, 
+            offlineEnabled: false 
+          } 
+        },
+        { session: tx.session }
+      );
+
+      await tx.commitTransaction();
+
+      // Emit live update to the UI
+      if (io) {
+        io.emit('PRODUCT_ARCHIVED', { id, name: product.name });
+      }
+
+      return ApiResponse.success(res, { 
+        archived: true, 
+        message: 'Product is linked to historical invoice transactions. It has been safely archived, and linked inventory channels have been deactivated.' 
+      });
+    }
+
+    // 2. Safe Hard-Delete (If no sales history exists)
+    logger.warn(`[ProductController] PERMANENT CASCADE DELETE initiated for: ${product.name} by User: ${req.user._id}`);
+
+    // Gather all image URLs for cleanup before removing from database
+    const imageUrls = [];
+    if (product.thumbnail) imageUrls.push(product.thumbnail);
+    if (product.images && product.images.length > 0) imageUrls.push(...product.images);
+    if (product.variants && product.variants.length > 0) {
+      product.variants.forEach(v => {
+        if (v.images && v.images.length > 0) imageUrls.push(...v.images);
+      });
+    }
+
+    const linkedInventories = await Inventory.find({ productRef: id }).session(tx.session);
+    linkedInventories.forEach(inv => {
+      if (inv.images && inv.images.length > 0) imageUrls.push(...inv.images);
+      if (inv.laptopImage) imageUrls.push(inv.laptopImage);
+      if (inv.tabletImage) imageUrls.push(inv.tabletImage);
+      if (inv.mobileImage) imageUrls.push(inv.mobileImage);
+      if (inv.thumbnail) imageUrls.push(inv.thumbnail);
     });
-  } catch (error) { next(error); }
+
+    // Strip duplicates and clean up Cloudinary assets
+    const uniqueUrls = [...new Set(imageUrls)].filter(Boolean);
+    for (const url of uniqueUrls) {
+      // Fire-and-forget delete (failure does not block database transaction integrity)
+      deleteCloudinaryAsset(url).catch(err => logger.error(`[Cloudinary Cleanup Error] ${err.message}`));
+    }
+
+    // Cascade delete database records atomically within transaction session
+    await Inventory.deleteMany({ productRef: id }, { session: tx.session });
+    await StockMovement.deleteMany({ productId: id }, { session: tx.session });
+    await Product.findByIdAndDelete(id, { session: tx.session });
+
+    await tx.commitTransaction();
+
+    // Emit live update to the UI
+    if (io) {
+      io.emit('PRODUCT_PURGED', { id, name: product.name });
+    }
+
+    return ApiResponse.success(res, { 
+      deleted: true, 
+      message: 'Product, associated inventory variants, stock histories, and cloud media assets have been successfully and permanently purged.' 
+    });
+
+  } catch (error) { 
+    await tx.abortTransaction();
+    next(error); 
+  } finally {
+    await tx.endSession();
+  }
 };
 
 exports.purgeProduct = async (req, res, next) => {
@@ -629,12 +732,27 @@ exports.getPOSProductVariants = async (req, res, next) => {
           (inv.onlineSold + inv.offlineSold + (inv.reservedStock || 0) + (inv.damaged || 0)));
         return {
           ...inv,
-          sellingPrice: product.discountedPrice || inv.sellingPrice,
+          sellingPrice: product.discountedPrice || inv.sellingPrice || product.sellingPrice,
           availableStock: avail,
           inStock: avail > 0,
           stockLabel: avail > 0 ? `${avail} IN STOCK` : 'OUT OF STOCK'
         };
       });
+
+      if (variants.length === 0) {
+         variants = [{
+            _id: `virtual-${product._id}`,
+            productRef: product._id,
+            productName: product.name,
+            sku: product.sku || 'N/A',
+            size: 'Standard',
+            color: 'Standard',
+            sellingPrice: product.discountedPrice || product.sellingPrice || 0,
+            availableStock: 0,
+            inStock: true,
+            stockLabel: '0 STOCK (Offline Billing Allowed)'
+         }];
+      }
     }
 
     console.log('[getPOSProductVariants] Returning variants for POS:', variants?.length);

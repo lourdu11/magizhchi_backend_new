@@ -34,6 +34,39 @@ const initCronJobs = () => {
     }
   });
 
+  // ─── 3. Shadow Data Reset Cleanup (Every 15 minutes) ──────────
+  cron.schedule('*/15 * * * *', async () => {
+    logger.info('🧹 CRON: Checking for expired Data Reset shadow collections...');
+    try {
+      const AuditLog = require('../models/AuditLog');
+      const mongoose = require('mongoose');
+      const db = mongoose.connection.db;
+
+      const expiredLogs = await AuditLog.find({
+        action: 'DATA_RESET',
+        canRestoreUntil: { $lte: new Date() },
+        status: { $ne: 'cleaned' } // Only clean those that haven't been swept
+      });
+
+      for (const log of expiredLogs) {
+        if (log.details && log.details.timestamp) {
+          const ts = log.details.timestamp;
+          const collections = Object.keys(log.documentsCounts || {});
+          
+          for (const collName of collections) {
+            const shadowName = `${collName}_deleted_${ts}`;
+            await db.collection(shadowName).drop().catch(() => {});
+          }
+        }
+        log.status = 'cleaned';
+        await log.save();
+        logger.info(`✅ CRON: Permanently dropped expired shadow data for reset ID: ${log._id}`);
+      }
+    } catch (error) {
+      logger.error(`🔥 CRON ERROR (Shadow Cleanup): ${error.message}`);
+    }
+  });
+
   logger.info('📅 CRON: Scheduled tasks initialized.');
 };
 

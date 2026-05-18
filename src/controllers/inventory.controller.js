@@ -577,6 +577,12 @@ exports.createInventoryItem = async (req, res, next) => {
       });
     }
 
+    // 🚀 STOREFRONT SYNC: Propagate the new variant instantly to the Product document
+    if (newItem.productRef) {
+      const SyncService = require('../services/sync.service');
+      await SyncService.syncProductStock(newItem.productRef);
+    }
+
     return ApiResponse.created(res, newItem, 'Variant created successfully with initial stock');
   } catch (error) { next(error); }
 };

@@ -30,6 +30,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const cookieParser = require('cookie-parser');
 const compression = require('compression');
+const hpp = require('hpp');
 const app = express();
 app.set('trust proxy', 1);
 
@@ -75,7 +76,7 @@ app.use(helmet({
 }));
 // BUG #16 FIX: Single merged cors() config — supports all origins including FRONTEND_URL env var
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173', 'https://magizhchigarments.vercel.app'],
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'],
   credentials: true,
   optionsSuccessStatus: 200
 }));
@@ -93,7 +94,7 @@ const csrfProtection = (req, res, next) => {
 
   // Validate Origin/Referer matches the configured frontend strictly
   const origin = req.headers.origin || req.headers.referer;
-  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173', 'https://magizhchigarments.vercel.app'];
+  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'];
   
   let isValidOrigin = false;
   try {
@@ -119,8 +120,11 @@ app.use(csrfProtection);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
+app.use(hpp());
 
 // ─── Custom NoSQL Injection Sanitizer (Express 5.x Getter-Safe) ─────
+const escapeRegex = (str) => typeof str === 'string' ? str.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') : str;
+
 const sanitizeObjectInPlace = (obj) => {
   if (obj === null || typeof obj !== 'object') return obj;
   for (const key in obj) {
@@ -137,7 +141,15 @@ const sanitizeObjectInPlace = (obj) => {
 
 const customMongoSanitize = (req, res, next) => {
   if (req.body) sanitizeObjectInPlace(req.body);
-  if (req.query) sanitizeObjectInPlace(req.query);
+  if (req.query) {
+    sanitizeObjectInPlace(req.query);
+    if (req.query.search) req.query.search = escapeRegex(req.query.search);
+    if (req.query.q) req.query.q = escapeRegex(req.query.q);
+    if (req.query.k) req.query.k = escapeRegex(req.query.k);
+    if (req.query.category && typeof req.query.category === 'string' && !/^[0-9a-fA-F]{24}$/.test(req.query.category)) {
+      req.query.category = escapeRegex(req.query.category);
+    }
+  }
   if (req.params) sanitizeObjectInPlace(req.params);
   next();
 };

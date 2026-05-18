@@ -29,9 +29,23 @@ exports.getCart = async (req, res, next) => {
 
 exports.addToCart = async (req, res, next) => {
   try {
-    const { productId, size, color, quantity = 1, comboSelections } = req.body;
+    let { productId, size, color, quantity = 1, comboSelections, variant } = req.body;
+    if (variant) {
+      if (!size) size = variant.size;
+      if (!color) color = variant.color;
+    }
+
+    const mongoose = require('mongoose');
+    if (!mongoose.Types.ObjectId.isValid(productId)) {
+      return ApiResponse.notFound(res, 'Product not found');
+    }
     const product = await Product.findById(productId);
-    if (!product || !product.isActive) return ApiResponse.notFound(res, 'Product not found');
+    if (!product) return ApiResponse.notFound(res, 'Product not found');
+    
+    const isStaffOrAdmin = req.user && (req.user.role === 'admin' || req.user.role === 'staff');
+    if (!product.isActive && !isStaffOrAdmin) {
+      return ApiResponse.notFound(res, 'Product is currently inactive');
+    }
 
     const Inventory = require('../models/Inventory');
     let cart = await Cart.findOne({ userId: req.user._id });
@@ -39,7 +53,11 @@ exports.addToCart = async (req, res, next) => {
 
     // Helper to get aggregate stock for a variant
     const getVariantStock = async (query) => {
-      const items = await Inventory.find({ ...query, onlineEnabled: true, isDeleted: false });
+      const filter = { ...query, isDeleted: false };
+      if (!isStaffOrAdmin) {
+        filter.onlineEnabled = true;
+      }
+      const items = await Inventory.find(filter);
       if (items.length === 0) return { exists: false, available: 0 };
       
       const totalAvailable = items.reduce((sum, inv) => {
@@ -65,15 +83,16 @@ exports.addToCart = async (req, res, next) => {
           ]
         });
 
-        if (!stockInfo.exists) 
+        if (!stockInfo.exists && !isStaffOrAdmin) 
           return ApiResponse.error(res, `${selection.productName} (${selection.size}) is not found in active inventory`, 404);
         
-        if (stockInfo.available < quantity) 
+        if (stockInfo.available < quantity && !isStaffOrAdmin) 
           return ApiResponse.error(res, `Only ${stockInfo.available} of ${selection.productName} available`, 400);
       }
 
       // 2. Add to cart (Unique check: same productId + same selections)
       const existingIdx = cart.items.findIndex(i => 
+        i.productId && 
         i.productId.toString() === productId && 
         i.isCombo && 
         JSON.stringify(i.comboSelections) === JSON.stringify(comboSelections)
@@ -100,18 +119,21 @@ exports.addToCart = async (req, res, next) => {
             size: { $regex: new RegExp(`^${size}$`, 'i') }, 
             color: { $regex: new RegExp(`^${color}$`, 'i') }
          });
-         if (!fallback.exists) return ApiResponse.error(res, 'This variant is not available for online purchase', 404);
+         if (!fallback.exists && !isStaffOrAdmin) return ApiResponse.error(res, 'This variant is not available for online purchase', 404);
          stockInfo.available = fallback.available;
       }
 
-      if (stockInfo.available < quantity) return ApiResponse.error(res, `Only ${stockInfo.available} items available`, 400);
-
+      if (stockInfo.available < quantity && !isStaffOrAdmin) {
+         return ApiResponse.error(res, `Only ${stockInfo.available} items available`, 400);
+      }
+ 
       const existingIdx = cart.items.findIndex(
-        i => i.productId.toString() === productId && !i.isCombo && i.variant.size === size && i.variant.color === color
+        i => i.productId && i.productId.toString() === productId && !i.isCombo && i.variant?.size === size && i.variant?.color === color
       );
-
+ 
       if (existingIdx > -1) {
-        cart.items[existingIdx].quantity = Math.min(stockInfo.available, cart.items[existingIdx].quantity + quantity);
+        const newQty = cart.items[existingIdx].quantity + quantity;
+        cart.items[existingIdx].quantity = isStaffOrAdmin ? newQty : Math.min(stockInfo.available, newQty);
       } else {
         cart.items.push({ productId, variant: { size, color }, quantity });
       }

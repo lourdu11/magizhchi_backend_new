@@ -24,7 +24,9 @@ const stockMovementSchema = new mongoose.Schema(
         'release',
         'exchange_in',
         'exchange_out',
-        'sale_correction'
+        'sale_correction',
+        'adjustment_in',
+        'adjustment_out'
       ],
       required: true,
     },

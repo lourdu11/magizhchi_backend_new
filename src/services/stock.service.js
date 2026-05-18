@@ -43,7 +43,12 @@ class StockService {
     );
 
     if (!inv) {
-      throw new Error('Insufficient stock or item not found');
+      const existing = await Inventory.findById(inventoryId).session(session);
+      if (!existing) {
+        throw new Error('Inventory item not found');
+      } else {
+        throw new Error(`Insufficient stock for ${existing.productName || 'product'}. Available: ${existing.availableStock || 0}`);
+      }
     }
 
     // 🚀 SINGLE SOURCE OF TRUTH: Trigger Unified Sync
@@ -121,6 +126,43 @@ class StockService {
       type: 'sale_pos',
       quantity: qty,
       reason: `POS Sale Committed: ${billNumber}`,
+      referenceId: billId,
+      referenceModel: 'Bill',
+      performedBy: userId
+    }], { session });
+
+    this._emitUpdate(inv);
+    return inv;
+  }
+
+  async commitDirectOfflineSale(inventoryId, qty, billNumber, billId, userId, session = null) {
+    logger.info(`[StockEngine] Committing Direct POS Sale: ${qty} units for Inv: ${inventoryId}`);
+
+    const inv = await Inventory.findOneAndUpdate(
+      { 
+        _id: inventoryId, 
+        isDeleted: { $ne: true }
+      },
+      { 
+        $inc: { availableStock: -qty, offlineSold: qty }
+      },
+      { session, new: true }
+    );
+
+    if (!inv) throw new Error('Inventory record lost or not found for POS sale');
+
+    // 🚀 SINGLE SOURCE OF TRUTH: Trigger Unified Sync
+    const SyncService = require('./sync.service');
+    await SyncService.syncProductStock(inv.productRef, session);
+
+    // Audit Log
+    await StockMovement.create([{
+      inventoryId: inv._id,
+      productId: inv.productRef,
+      variant: { size: inv.size, color: inv.color },
+      type: 'sale_pos',
+      quantity: qty,
+      reason: `POS Sale: ${billNumber}`,
       referenceId: billId,
       referenceModel: 'Bill',
       performedBy: userId
@@ -306,10 +348,11 @@ class StockService {
     for (const [field, val] of Object.entries(increments)) {
       if (val === 0) continue;
 
-      // 1. Update the specific variant in the array
-      // Mapping: reserved -> reserved, offlineSold -> offlineSold, etc.
-      const variantField = field === 'available' ? 'available' : field;
-      update.$inc[`variants.$[elem].${variantField}`] = val;
+      // 1. Update the specific variant in the array if it's a supported field
+      if (field === 'available' || field === 'totalStock' || field === 'total') {
+        const variantField = field === 'available' ? 'available' : 'totalStock';
+        update.$inc[`variants.$[elem].${variantField}`] = val;
+      }
       
       // 2. Also update the root-level aggregation fields (Parity Shield)
       if (field === 'available' || field === 'availableStock') update.$inc['availableStock'] = val;
@@ -320,14 +363,18 @@ class StockService {
 
     if (Object.keys(update.$inc).length === 0) return;
 
+    const hasArrayFilter = Object.keys(update.$inc).some(k => k.includes('$[elem]'));
+
     await Product.findOneAndUpdate(
       { _id: productId },
       update,
       { 
-        arrayFilters: [{ 
-          "elem.size": sizeRegex, 
-          "elem.color": colorRegex 
-        }],
+        ...(hasArrayFilter ? {
+          arrayFilters: [{ 
+            "elem.size": sizeRegex, 
+            "elem.color": colorRegex 
+          }]
+        } : {}),
         session,
         new: true
       }

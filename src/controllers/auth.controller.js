@@ -70,11 +70,13 @@ exports.login = async (req, res, next) => {
       if (user.isBlocked)
         return ApiResponse.forbidden(res, 'Account blocked. Contact support.');
 
-      // Check if account is locked
+      // Check if account is locked (Disabled for development ease)
+      /* 
       if (user.lockUntil && user.lockUntil > Date.now()) {
         const remaining = Math.ceil((user.lockUntil - Date.now()) / 60000);
         return ApiResponse.error(res, `Too many failed attempts. Try after ${remaining} minutes.`, 423);
       }
+      */
 
       const isMatch = await user.comparePassword(password);
       if (!isMatch) {

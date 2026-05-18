@@ -68,7 +68,9 @@ const inventorySchema = new mongoose.Schema(
 
     // ── Archival / Soft-Delete ──────────────────────────────
     isDeleted: { type: Boolean, default: false },
-    deletedAt: { type: Date }
+    deletedAt: { type: Date },
+    isArchived: { type: Boolean, default: false, index: true },
+    archivedAt: { type: Date }
   },
   {
     timestamps: true,
@@ -105,13 +107,13 @@ inventorySchema.index({ productName: 'text', category: 'text', color: 'text' });
 
 // ── HIGH-PERFORMANCE COMPOUND INDEXES ────────────────
 // POS channel query: offlineEnabled products by stock (most common POS query)
-inventorySchema.index({ offlineEnabled: 1, isDeleted: 1, availableStock: -1 });
+inventorySchema.index({ offlineEnabled: 1, isDeleted: 1, isArchived: 1, availableStock: -1 });
 // Online channel query: onlineEnabled products
-inventorySchema.index({ onlineEnabled: 1, isDeleted: 1, availableStock: -1 });
+inventorySchema.index({ onlineEnabled: 1, isDeleted: 1, isArchived: 1, availableStock: -1 });
 // Admin inventory lookup: by product ref and status
-inventorySchema.index({ productRef: 1, isDeleted: 1, availableStock: -1 });
+inventorySchema.index({ productRef: 1, isDeleted: 1, isArchived: 1, availableStock: -1 });
 // Dashboard low-stock alert query
-inventorySchema.index({ isDeleted: 1, availableStock: 1, lowStockThreshold: 1 });
+inventorySchema.index({ isDeleted: 1, isArchived: 1, availableStock: 1, lowStockThreshold: 1 });
 
 inventorySchema.plugin(leanVirtuals);
 
