@@ -89,10 +89,12 @@ const useMongoDBAuthState = async (sessionKey = 'baileys-auth') => {
                     await Promise.all(
                         ids.map(async (id) => {
                             let value = await readData(`${type}-${id}`);
-                            if (type === 'app-state-sync-key' && value) {
-                                value = value; // Already handled by BufferJSON
+                            if (value) {
+                                if (type === 'app-state-sync-key') {
+                                    value = value; // Already handled by BufferJSON
+                                }
+                                data[id] = value;
                             }
-                            data[id] = value;
                         })
                     );
                     return data;
@@ -165,8 +167,15 @@ const closeWhatsApp = async () => {
 const initWhatsApp = async () => {
     const now = Date.now();
     
-    // 1. Singleton Check (Basic cooldown/lock)
-    if (isInitializing || (now - lastInitTime < 10000)) return;
+    // 1. Singleton Check with 45s Watchdog
+    if (isInitializing && (now - lastInitTime < 45000)) {
+        logger.info('📱 WhatsApp: Already initializing, skipping...');
+        return;
+    }
+    if (!isInitializing && (now - lastInitTime < 10000)) {
+        logger.info('📱 WhatsApp: Cooldown active, skipping...');
+        return;
+    }
     
     isInitializing = true;
     lastInitTime = now;
