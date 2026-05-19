@@ -16,10 +16,11 @@ const generateTokens = (userId) => ({
 });
 
 const setCookies = (res, accessToken, refreshToken) => {
+  const isProduction = process.env.NODE_ENV === 'production';
   const opts = {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax',
   };
   res.cookie('token', accessToken, { ...opts, maxAge: 24 * 60 * 60 * 1000 });
   res.cookie('refreshToken', refreshToken, { ...opts, maxAge: 7 * 24 * 60 * 60 * 1000 });
@@ -308,8 +309,14 @@ exports.logout = async (req, res, next) => {
     if (req.user?._id) {
       await User.findByIdAndUpdate(req.user._id, { $unset: { refreshToken: 1 } });
     }
-    res.clearCookie('token');
-    res.clearCookie('refreshToken');
+    const isProduction = process.env.NODE_ENV === 'production';
+    const opts = {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? 'none' : 'lax',
+    };
+    res.clearCookie('token', opts);
+    res.clearCookie('refreshToken', opts);
     return ApiResponse.success(res, null, 'Logged out successfully');
   } catch (error) {
     next(error);
