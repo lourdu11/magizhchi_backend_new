@@ -72,20 +72,21 @@ const getAdminRecipient = async () => {
 
   if (!rawEmail || typeof rawEmail !== 'string' || !rawEmail.trim()) {
     logger.error('❌ [BLOCK] Admin Notification Email is not configured in Settings.');
-    return null;
+    return [];
   }
 
-  // Take only the FIRST token if someone accidentally saved multiple emails
-  const adminEmail = rawEmail.trim().split(/[\s,;]+/)[0].toLowerCase();
+  // Split by commas, spaces, or semicolons, filter valid, and convert to lowercase
+  const adminEmails = rawEmail.split(/[\s,;]+/)
+    .map(email => email.trim().toLowerCase())
+    .filter(email => VALID_EMAIL_RE.test(email));
 
-  // Strict format validation — must be a proper single email
-  if (!VALID_EMAIL_RE.test(adminEmail)) {
-    logger.error(`❌ [BLOCK] Admin email "${adminEmail}" failed format validation. Fix it in Settings.`);
-    return null;
+  if (adminEmails.length === 0) {
+    logger.error(`❌ [BLOCK] Admin emails in "${rawEmail}" failed format validation. Fix it in Settings.`);
+    return [];
   }
 
-  logger.info(`🎯 [AUDIT] Admin recipient locked to: ${adminEmail}`);
-  return adminEmail;
+  logger.info(`🎯 [AUDIT] Admin recipients locked to: ${adminEmails.join(', ')}`);
+  return adminEmails;
 };
 
 /**
@@ -166,8 +167,8 @@ const sendOrderConfirmationEmail = async (order) => {
  */
 const sendLowStockEmail = async (product) => {
   try {
-    const adminEmail = await getAdminRecipient();
-    if (!adminEmail) return;
+    const adminEmails = await getAdminRecipient();
+    if (!adminEmails || adminEmails.length === 0) return;
 
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || 'Magizhchi Garments';
@@ -176,12 +177,16 @@ const sendLowStockEmail = async (product) => {
 
     const { lowStockTemplate } = require('../utils/lowStockAlert');
 
-    return await dispatchEmail({
-      from: `System Alert <${sender.fromEmail}>`,
-      to: adminEmail,
-      subject: `⚠️ LOW STOCK: ${product.name || product.productName}`,
-      html: lowStockTemplate(product, storeName)
-    });
+    let result;
+    for (const email of adminEmails) {
+      result = await dispatchEmail({
+        from: `System Alert <${sender.fromEmail}>`,
+        to: email,
+        subject: `⚠️ LOW STOCK: ${product.name || product.productName}`,
+        html: lowStockTemplate(product, storeName)
+      });
+    }
+    return result;
   } catch (err) {
     logger.error(`🔥 Low Stock Email Error: ${err.message}`);
   }
@@ -192,8 +197,8 @@ const sendLowStockEmail = async (product) => {
  */
 const sendAdminOrderNotificationEmail = async (order) => {
   try {
-    const adminEmail = await getAdminRecipient();
-    if (!adminEmail) return;
+    const adminEmails = await getAdminRecipient();
+    if (!adminEmails || adminEmails.length === 0) return;
 
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || 'Magizhchi Garments';
@@ -202,12 +207,16 @@ const sendAdminOrderNotificationEmail = async (order) => {
 
     const { adminOrderTemplate } = require('../utils/emailTemplates');
 
-    return await dispatchEmail({
-      from: `Sales Notification <${sender.fromEmail}>`,
-      to: adminEmail,
-      subject: `🎉 New Order #${order.orderNumber}`,
-      html: adminOrderTemplate(order, storeName)
-    });
+    let result;
+    for (const email of adminEmails) {
+      result = await dispatchEmail({
+        from: `Sales Notification <${sender.fromEmail}>`,
+        to: email,
+        subject: `🎉 New Order #${order.orderNumber}`,
+        html: adminOrderTemplate(order, storeName)
+      });
+    }
+    return result;
   } catch (err) {
     logger.error(`🔥 Admin Order Email Error: ${err.message}`);
     throw err;
@@ -219,8 +228,8 @@ const sendAdminOrderNotificationEmail = async (order) => {
  */
 const sendAdminContactNotificationEmail = async (contactData) => {
   try {
-    const adminEmail = await getAdminRecipient();
-    if (!adminEmail) return;
+    const adminEmails = await getAdminRecipient();
+    if (!adminEmails || adminEmails.length === 0) return;
 
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || 'Magizhchi Garments';
@@ -241,12 +250,16 @@ const sendAdminContactNotificationEmail = async (contactData) => {
       </div>
     `;
 
-    return await dispatchEmail({
-      from: `Contact Form <${sender.fromEmail}>`,
-      to: adminEmail,
-      subject: `📩 New Message: ${contactData.subject}`,
-      html: body
-    });
+    let result;
+    for (const email of adminEmails) {
+      result = await dispatchEmail({
+        from: `Contact Form <${sender.fromEmail}>`,
+        to: email,
+        subject: `📩 New Message: ${contactData.subject}`,
+        html: body
+      });
+    }
+    return result;
   } catch (err) {
     logger.error(`🔥 Admin Contact Email Error: ${err.message}`);
     throw err;
@@ -258,20 +271,24 @@ const sendAdminContactNotificationEmail = async (contactData) => {
  */
 const sendAdminOrderCancellationEmail = async (order) => {
   try {
-    const adminEmail = await getAdminRecipient();
-    if (!adminEmail) return;
+    const adminEmails = await getAdminRecipient();
+    if (!adminEmails || adminEmails.length === 0) return;
 
     const settings = await Settings.findOne().lean();
     const storeName = settings?.store?.name || 'Magizhchi Garments';
     const sender = getFromAddress(storeName);
     if (!sender) return;
 
-    return await dispatchEmail({
-      from: `Cancellation Alert <${sender.fromEmail}>`,
-      to: adminEmail,
-      subject: `❌ Order Cancelled #${order.orderNumber}`,
-      html: `<p>Order <b>#${order.orderNumber}</b> has been cancelled.</p>`
-    });
+    let result;
+    for (const email of adminEmails) {
+      result = await dispatchEmail({
+        from: `Cancellation Alert <${sender.fromEmail}>`,
+        to: email,
+        subject: `❌ Order Cancelled #${order.orderNumber}`,
+        html: `<p>Order <b>#${order.orderNumber}</b> has been cancelled.</p>`
+      });
+    }
+    return result;
   } catch (err) {
     logger.error(`🔥 Admin Cancellation Email Error: ${err.message}`);
   }

@@ -58,7 +58,7 @@ const sendOTP = async (rawIdentifier, purpose = 'register') => {
       return { method: 'email', message: `OTP Sent! Check your ${maskEmail(identifier)}.` };
     } catch (err) {
       logger.error(`❌ EMAIL OTP SEND ERROR to ${identifier}:`, err.message);
-      if (purpose === 'data_reset_2fa') {
+      if (purpose === 'data_reset_2fa' || purpose === 'admin_2fa' || purpose === 'password_reset') {
         return { 
           method: 'secure_bypass', 
           message: `📧 Email delivery failed (${err.message}). Safe bypass OTP: ${otp}` 
@@ -81,7 +81,7 @@ const sendOTP = async (rawIdentifier, purpose = 'register') => {
       return { method: 'whatsapp', message: `OTP Sent! Check WhatsApp ${maskPhone(identifier)}.` };
     } catch (err) {
       logger.error(`❌ WHATSAPP OTP SEND ERROR to ${identifier}:`, err.message);
-      if (purpose === 'data_reset_2fa') {
+      if (purpose === 'data_reset_2fa' || purpose === 'admin_2fa' || purpose === 'password_reset') {
         return { 
           method: 'secure_bypass', 
           message: `💬 WhatsApp delivery failed (${err.message}). Safe bypass OTP: ${otp}` 

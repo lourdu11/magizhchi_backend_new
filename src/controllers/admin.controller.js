@@ -771,18 +771,18 @@ exports.updateSettings = async (req, res, next) => {
       const updateData = {};
       
       // 1. Sanitize & Map Email Notifications with strict database update
-      let sanitizedEmail = '';
       if (settingsData.notifications?.email) {
         const rawEmail = settingsData.notifications.email.alertEmail || '';
-        sanitizedEmail = rawEmail.trim().split(/[\s,;]/)[0].toLowerCase();
+        const emailList = rawEmail.split(/[\s,;]+/).map(e => e.trim().toLowerCase()).filter(Boolean);
         
-        if (sanitizedEmail) {
-          const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-          if (!emailRegex.test(sanitizedEmail)) {
-            return ApiResponse.error(res, 'Invalid admin notification email format', 400);
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        for (const email of emailList) {
+          if (!emailRegex.test(email)) {
+            return ApiResponse.error(res, `Invalid admin notification email format: ${email}`, 400);
           }
         }
-        updateData['notifications.email.alertEmail'] = sanitizedEmail;
+        
+        updateData['notifications.email.alertEmail'] = emailList.join(', ');
         updateData['notifications.email.apiKey'] = settingsData.notifications.email.apiKey;
         updateData['notifications.email.host'] = settingsData.notifications.email.host || '';
         updateData['notifications.email.port'] = Number(settingsData.notifications.email.port) || 587;
@@ -794,7 +794,16 @@ exports.updateSettings = async (req, res, next) => {
 
       // 2. Map WhatsApp Notifications
       if (settingsData.notifications?.whatsapp) {
-        updateData['notifications.whatsapp.adminPhone'] = settingsData.notifications.whatsapp.adminPhone || '';
+        const rawPhone = settingsData.notifications.whatsapp.adminPhone || '';
+        const phoneList = rawPhone.split(/[\s,;]+/).map(p => p.trim()).filter(Boolean);
+        
+        for (const phone of phoneList) {
+          const cleanPhone = phone.replace(/\D/g, '');
+          if (cleanPhone.length < 10) {
+            return ApiResponse.error(res, `Invalid WhatsApp phone number: ${phone}. Must contain at least 10 digits.`, 400);
+          }
+        }
+        updateData['notifications.whatsapp.adminPhone'] = phoneList.join(', ');
       }
 
       // 3. Map Feature Toggles (Order, Contact, Stock)
@@ -959,9 +968,11 @@ exports.testNotifications = async (req, res, next) => {
     // ── VALIDATE ADMIN EMAIL FIRST ────────────────────────────────────────────
     const rawAdminEmail = (settings?.notifications?.email?.alertEmail || '').trim();
     const VALID_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    const adminEmail = rawAdminEmail.split(/[\s,;]+/)[0].toLowerCase();
+    const adminEmails = rawAdminEmail.split(/[\s,;]+/)
+      .map(e => e.trim().toLowerCase())
+      .filter(e => VALID_EMAIL_RE.test(e));
 
-    if (!adminEmail || !VALID_EMAIL_RE.test(adminEmail)) {
+    if (adminEmails.length === 0) {
       logger.error(`❌ [TEST-BLOCK] Admin email invalid or missing: "${rawAdminEmail}"`);
       return res.status(400).json({
         success: false,
@@ -969,7 +980,7 @@ exports.testNotifications = async (req, res, next) => {
       });
     }
 
-    logger.info(`🧪 Test [${type.toUpperCase()}] → SINGLE RECIPIENT: ${adminEmail}`);
+    logger.info(`🧪 Test [${type.toUpperCase()}] → RECIPIENTS: ${adminEmails.join(', ')}`);
 
     const results = {};
 
@@ -998,8 +1009,8 @@ exports.testNotifications = async (req, res, next) => {
       if (['email', 'both'].includes(method)) {
         try {
           const r = await emailService.sendAdminOrderNotificationEmail(dummyOrder);
-          results.emailOrder = { success: true, message: `✅ Email sent to ${adminEmail} only`, messageId: r?.messageId || 'delivered' };
-          logger.info(`✅ Test order email → ${adminEmail}`);
+          results.emailOrder = { success: true, message: `✅ Email sent to ${adminEmails.join(', ')}`, messageId: r?.messageId || 'delivered' };
+          logger.info(`✅ Test order email → ${adminEmails.join(', ')}`);
         } catch (e) {
           results.emailOrder = { success: false, error: e.message };
           logger.error('Order Email Test Error:', e.message);
@@ -1023,7 +1034,7 @@ exports.testNotifications = async (req, res, next) => {
       if (['email', 'both'].includes(method)) {
         try {
           const r = await emailService.sendAdminContactNotificationEmail(dummyContact);
-          results.emailContact = { success: true, message: `✅ Email sent to ${adminEmail} only`, messageId: r?.messageId || 'delivered' };
+          results.emailContact = { success: true, message: `✅ Email sent to ${adminEmails.join(', ')}`, messageId: r?.messageId || 'delivered' };
           logger.info(`✅ Test contact email → ${adminEmail}`);
         } catch (e) {
           results.emailContact = { success: false, error: e.message };

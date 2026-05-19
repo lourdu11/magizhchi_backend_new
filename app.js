@@ -69,7 +69,7 @@ app.use(helmet({
       "frame-src": ["'self'", "https://*.razorpay.com", "https://razorpay.com", "https://*.google.com", "https://www.google.com"],
       "frame-ancestors": ["'self'", "https://*.razorpay.com", "https://razorpay.com"],
       "script-src": ["'self'", "https://checkout.razorpay.com", "https://*.razorpay.com", "https://*.google.com", "https://www.google.com", "https://*.gstatic.com"],
-      "img-src": ["'self'", "https://*.razorpay.com", "https://ik.imagekit.io", "https://res.cloudinary.com", "https://*.google.com"],
+      "img-src": ["'self'", "data:", "https://*.razorpay.com", "https://ik.imagekit.io", "https://res.cloudinary.com", "https://*.google.com", "https://api.qrserver.com", "https://images.unsplash.com", "https://placehold.co"],
       "connect-src": ["'self'", "https://*.razorpay.com", "https://magizhchi-backend-28sx.onrender.com", "https://ik.imagekit.io", "https://res.cloudinary.com"],
     },
   },

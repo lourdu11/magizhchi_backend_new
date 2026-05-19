@@ -135,12 +135,16 @@ const clearSessionFromDb = async (sessionKey = 'baileys-auth') => {
 const getAdminSettings = async () => {
   try {
     const settings = await Settings.findOne();
+    const rawPhone = settings?.notifications?.whatsapp?.adminPhone || process.env.STORE_PHONE || '';
+    const adminPhones = rawPhone.split(/[\s,;]+/)
+      .map(p => p.trim())
+      .filter(p => p.length >= 10);
     return {
-      adminPhone: settings?.notifications?.whatsapp?.adminPhone || process.env.STORE_PHONE,
+      adminPhones: adminPhones.length > 0 ? adminPhones : [process.env.STORE_PHONE].filter(Boolean),
       storeName: settings?.storeName || 'Magizhchi Garments'
     };
   } catch (err) {
-    return { adminPhone: process.env.STORE_PHONE, storeName: 'Magizhchi Garments' };
+    return { adminPhones: [process.env.STORE_PHONE].filter(Boolean), storeName: 'Magizhchi Garments' };
   }
 };
 
@@ -308,8 +312,8 @@ const sendMessage = async (phone, message, options = {}, retries = 3) => {
 };
 
 const sendContactMessageNotificationToAdmin = async (contact) => {
-    const { adminPhone } = await getAdminSettings();
-    if (!adminPhone) return;
+    const { adminPhones } = await getAdminSettings();
+    if (!adminPhones || adminPhones.length === 0) return;
 
     const msg = `📩 *NEW CONTACT MESSAGE*\n` +
                 `*Magizhchi Garments*\n` +
@@ -322,12 +326,16 @@ const sendContactMessageNotificationToAdmin = async (contact) => {
                 `──────────────────\n` +
                 `*Please respond promptly.*`;
                 
-    return await sendMessage(adminPhone, msg);
+    let result;
+    for (const phone of adminPhones) {
+        result = await sendMessage(phone, msg);
+    }
+    return result;
 };
 
 const sendOrderNotificationToAdmin = async (order) => {
-    const { adminPhone } = await getAdminSettings();
-    if (!adminPhone) return;
+    const { adminPhones } = await getAdminSettings();
+    if (!adminPhones || adminPhones.length === 0) return;
 
     const itemsSummary = order.items.map(item => `- ${item.productName} (${item.variant.size}/${item.variant.color}) x${item.quantity}`).join('\n');
 
@@ -343,12 +351,16 @@ const sendOrderNotificationToAdmin = async (order) => {
                 `──────────────────\n` +
                 `*Check the Admin Dashboard for details.*`;
 
-    return await sendMessage(adminPhone, msg);
+    let result;
+    for (const phone of adminPhones) {
+        result = await sendMessage(phone, msg);
+    }
+    return result;
 };
 
 const sendOrderCancellationNotificationToAdmin = async (order, reason) => {
-    const { adminPhone } = await getAdminSettings();
-    if (!adminPhone) return;
+    const { adminPhones } = await getAdminSettings();
+    if (!adminPhones || adminPhones.length === 0) return;
 
     const msg = `🚫 *ORDER CANCELLED*\n` +
                 `*Magizhchi Garments*\n` +
@@ -359,12 +371,16 @@ const sendOrderCancellationNotificationToAdmin = async (order, reason) => {
                 `⚠️ *Reason:* ${reason || 'Not provided'}\n\n` +
                 `──────────────────`;
 
-    return await sendMessage(adminPhone, msg);
+    let result;
+    for (const phone of adminPhones) {
+        result = await sendMessage(phone, msg);
+    }
+    return result;
 };
 
 const sendProductNotificationToAdmin = async (product, action = 'updated') => {
-    const { adminPhone } = await getAdminSettings();
-    if (!adminPhone) return;
+    const { adminPhones } = await getAdminSettings();
+    if (!adminPhones || adminPhones.length === 0) return;
 
     const emoji = action === 'created' ? '✨' : '📝';
     const title = action === 'created' ? 'NEW PRODUCT CREATED' : 'PRODUCT UPDATED';
@@ -379,12 +395,16 @@ const sendProductNotificationToAdmin = async (product, action = 'updated') => {
                 `──────────────────\n` +
                 `*Check Admin Dashboard for full details.*`;
 
-    return await sendMessage(adminPhone, msg);
+    let result;
+    for (const phone of adminPhones) {
+        result = await sendMessage(phone, msg);
+    }
+    return result;
 };
 
 const sendStockAlertToAdmin = async (item, currentStock) => {
-    const { adminPhone } = await getAdminSettings();
-    if (!adminPhone) return;
+    const { adminPhones } = await getAdminSettings();
+    if (!adminPhones || adminPhones.length === 0) return;
 
     const msg = `🚨 *LOW STOCK ALERT*\n` +
                 `*Magizhchi Garments*\n` +
@@ -396,7 +416,11 @@ const sendStockAlertToAdmin = async (item, currentStock) => {
                 `──────────────────\n` +
                 `*Please restock this item soon.*`;
 
-    return await sendMessage(adminPhone, msg);
+    let result;
+    for (const phone of adminPhones) {
+        result = await sendMessage(phone, msg);
+    }
+    return result;
 };
 
 const sendWhatsAppOTP = async (phone, otp) => {
