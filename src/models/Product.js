@@ -155,8 +155,8 @@ productSchema.pre('save', async function () {
     this.profitMargin = 0;
   }
 
-  // 5. Generate Slug if missing
-  if (!this.slug && this.name) {
+  // 5. Generate Slug if missing or name is modified (and slug is not explicitly updated)
+  if (!this.slug || (this.isModified('name') && !this.isModified('slug'))) {
     const baseSlug = slugify(this.name, { lower: true, strict: true });
     this.slug = `${baseSlug}-${Math.random().toString(36).substring(2, 7)}`;
   }
