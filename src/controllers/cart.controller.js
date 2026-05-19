@@ -5,7 +5,7 @@ const ApiResponse = require('../utils/apiResponse');
 exports.getCart = async (req, res, next) => {
   try {
     let cart = await Cart.findOne({ userId: req.user._id })
-      .populate('items.productId', 'name images sellingPrice discountedPrice isActive isDeleted');
+      .populate('items.productId', 'name images sellingPrice discountedPrice isActive isDeleted multiBuyEnabled multiBuyQuantity multiBuyPrice');
     
     if (!cart) {
       return ApiResponse.success(res, { cart: { items: [] } });
@@ -140,7 +140,7 @@ exports.addToCart = async (req, res, next) => {
     }
 
     await cart.save();
-    await cart.populate('items.productId', 'name images sellingPrice discountedPrice');
+    await cart.populate('items.productId', 'name images sellingPrice discountedPrice multiBuyEnabled multiBuyQuantity multiBuyPrice');
     return ApiResponse.success(res, { cart }, 'Added to cart');
   } catch (error) { 
     console.error('🔥 AddToCart Error:', error);
