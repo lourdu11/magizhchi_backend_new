@@ -40,6 +40,11 @@ const productSchema = new mongoose.Schema(
     profitMargin: { type: Number },
     currency: { type: String, default: 'INR' },
 
+    // Multi-Buy Promo Logical Control
+    multiBuyEnabled: { type: Boolean, default: false },
+    multiBuyQuantity: { type: Number, default: 2 },
+    multiBuyPrice: { type: Number, default: 0, min: 0 },
+
     // ── SECTION 3: Inventory & Stock ────────────────────────
     // Aggregated from variants via pre-save
     totalStock: { type: Number, default: 0 },

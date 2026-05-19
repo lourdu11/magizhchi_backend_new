@@ -75,6 +75,14 @@ exports.createOrder = async (req, res, next) => {
     let subtotal = 0;
     const orderItems = [];
 
+    // Pre-calculate total quantities per product ID to apply multi-buy promo pricing correctly
+    const productQtyMap = {};
+    for (const item of items) {
+      if (item.productId) {
+        productQtyMap[item.productId.toString()] = (productQtyMap[item.productId.toString()] || 0) + Number(item.quantity || 0);
+      }
+    }
+
     // 1. Build order items and check stock in Inventory
     for (const item of items) {
       const product = await Product.findById(item.productId);
@@ -101,17 +109,34 @@ exports.createOrder = async (req, res, next) => {
         return { totalAvailable, inventoryId: invItems[0]._id, sku: invItems[0].sku, purchasePrice: invItems[0].purchasePrice };
       };
 
-      const price = Number(product.discountedPrice || product.sellingPrice || 0);
+      let price = Number(product.discountedPrice || product.sellingPrice || 0);
       const qty = Number(item.quantity);
       
       console.log(`[ORDER DEBUG] Product: ${product.name}, Selling: ${product.sellingPrice}, Discounted: ${product.discountedPrice}, Final Price: ${price}`);
 
       if (!qty || qty < 1) throw { message: `Invalid quantity for ${product.name}. Min 1 required.`, statusCode: 400 };
 
+      // Secure Backend Multi-Buy Promo Price calculation
+      if (product.multiBuyEnabled && product.multiBuyQuantity > 0 && product.multiBuyPrice > 0) {
+        const totalProductQty = productQtyMap[product._id.toString()] || qty;
+        const triggerQty = product.multiBuyQuantity;
+        const promoPrice = product.multiBuyPrice;
+        
+        if (totalProductQty >= triggerQty) {
+          const numBundles = Math.floor(totalProductQty / triggerQty);
+          const remainderQty = totalProductQty % triggerQty;
+          const totalPromoAmount = (numBundles * promoPrice) + (remainderQty * price);
+          
+          // Proportional average unit price
+          const avgUnitPrice = totalPromoAmount / totalProductQty;
+          price = parseFloat(avgUnitPrice.toFixed(2));
+        }
+      }
+
       const gstRate = Number(product.gstPercentage || 5) / 100;
       const taxableValue = parseFloat((price * qty / (1 + gstRate)).toFixed(2));
       const gstAmount = parseFloat((price * qty - taxableValue).toFixed(2));
-      const itemTotal = price * qty;
+      const itemTotal = parseFloat((price * qty).toFixed(2));
       
       console.log(`[ORDER DEBUG] Item Total: ${itemTotal}, Subtotal Before: ${subtotal}`);
 
