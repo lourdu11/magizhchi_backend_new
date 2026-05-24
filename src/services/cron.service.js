@@ -67,6 +67,20 @@ const initCronJobs = () => {
     }
   });
 
+  // ─── 4. Keep-Alive Self-Ping (Every 14 minutes) ──────────
+  // Prevents Render from spinning down the free tier backend
+  cron.schedule('*/14 * * * *', async () => {
+    logger.info('🔄 CRON: Keep-alive ping to prevent Render sleep...');
+    try {
+      const axios = require('axios');
+      const backendUrl = process.env.BACKEND_URL || 'https://magizhchi-backend-28sx.onrender.com';
+      await axios.get(`${backendUrl}/api/v1/health`);
+      logger.info('✅ CRON: Keep-alive ping successful.');
+    } catch (error) {
+      logger.error(`🔥 CRON ERROR (Keep-alive): ${error.message}`);
+    }
+  });
+
   logger.info('📅 CRON: Scheduled tasks initialized.');
 };
 
