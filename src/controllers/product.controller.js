@@ -28,12 +28,15 @@ exports.getProducts = async (req, res, next) => {
 
     if (isAdmin === 'true') {
        delete query.isActive; 
+       res.set('Cache-Control', 'no-store');
     } else if (isPOS === 'true') {
        delete query.isActive;
        query.isBillingProduct = true;
+       res.set('Cache-Control', 'no-store');
     } else {
        query.isOnlineProduct = true;
        query.isActive = true;
+       res.set('Cache-Control', 'public, max-age=60, s-maxage=60, stale-while-revalidate=300');
     }
 
     if (category) {
