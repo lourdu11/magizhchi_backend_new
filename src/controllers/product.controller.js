@@ -58,6 +58,8 @@ exports.getProducts = async (req, res, next) => {
        query.$or = [
           { name: { $regex: search, $options: 'i' } },
           { sku: { $regex: search, $options: 'i' } },
+          { barcode: { $regex: search, $options: 'i' } },
+          { 'variants.barcode': { $regex: search, $options: 'i' } },
           { description: { $regex: search, $options: 'i' } }
        ];
     }
@@ -766,3 +768,54 @@ exports.getPOSProductVariants = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
+// GET /products/barcode/:code (POS Barcode Lookup — Retsol LS Scanner)
+exports.getProductByBarcode = async (req, res, next) => {
+  try {
+    const { code } = req.params;
+    if (!code) return ApiResponse.error(res, 'Barcode is required', 400);
+
+    // Search product-level barcode AND variant-level barcode AND SKU
+    const product = await Product.findOne({
+      $or: [
+        { barcode: code },
+        { sku: code.toUpperCase() },
+        { 'variants.barcode': code },
+        { 'variants.sku': code.toUpperCase() }
+      ],
+      isBillingProduct: true,
+      isDeleted: { $ne: true },
+      isArchived: { $ne: true }
+    })
+    .populate('category', 'name slug')
+    .lean();
+
+    if (!product) {
+      return ApiResponse.notFound(res, `No product found for barcode: ${code}`);
+    }
+
+    // Get live inventory variants for this product
+    const invRecords = await Inventory.find({
+      productRef: product._id,
+      isDeleted: { $ne: true }
+    }).lean();
+
+    const variants = invRecords.map(inv => {
+      const avail = Math.max(0,
+        (inv.totalStock + (inv.returned || 0)) -
+        (inv.onlineSold + inv.offlineSold + (inv.reservedStock || 0) + (inv.damaged || 0))
+      );
+      return { ...inv, availableStock: avail };
+    });
+
+    // Find the exact matched variant if barcode is variant-level
+    const matchedVariant = variants.find(
+      v => v.barcode === code || v.sku === code.toUpperCase()
+    );
+
+    return ApiResponse.success(res, {
+      product: { ...product, variants },
+      matchedVariant: matchedVariant || null
+    });
+
+  } catch (error) { next(error); }
+};

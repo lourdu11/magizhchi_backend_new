@@ -6,6 +6,7 @@ const { isAdmin } = require('../middlewares/auth');
 
 r.get('/', c.getProducts);
 r.get('/search', c.searchProducts);
+r.get('/barcode/:code', protect, c.getProductByBarcode); // 🔍 POS Barcode Lookup (Retsol LS)
 r.get('/:slug', c.getProduct);
 r.get('/admin/detail/:id', protect, isAdmin, c.getAdminProductById);
 r.post('/', protect, isAdmin, c.createProduct);
