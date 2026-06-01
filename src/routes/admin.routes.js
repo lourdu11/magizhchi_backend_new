@@ -1,6 +1,7 @@
 const express = require('express');
 const r = express.Router();
 const c = require('../controllers/admin.controller');
+const publicController = require('../controllers/public.controller');
 const productController = require('../controllers/product.controller');
 const { protect, isAdmin, isStaff, authorize } = require('../middlewares/auth');
 
@@ -17,6 +18,7 @@ r.put('/users/:id/toggle-block', isAdmin, c.toggleBlockUser);
 r.delete('/users/:id', isAdmin, c.deleteUser);
 r.post('/users', isAdmin, c.createCustomer);
 r.get('/staff', isAdmin, c.getStaff);
+r.get('/staff-list', isStaff, publicController.getStaffList);
 r.post('/staff', isAdmin, c.createStaff);
 r.put('/staff/:id', isAdmin, c.updateStaff);
 r.delete('/staff/:id', isAdmin, c.deleteStaff);

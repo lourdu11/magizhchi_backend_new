@@ -52,7 +52,7 @@ const inventorySchema = new mongoose.Schema(
     posDisplayName:     { type: String, trim: true },
     posCategory:        { type: String, trim: true },
     isDiscountAllowed:  { type: Boolean, default: true },
-    maxDiscountPercent: { type: Number, default: 100, min: 0, max: 100 },
+    maxDiscountPercent: { type: Number, default: 50, min: 0, max: 100 },
 
     // ── Thresholds ───────────────────────────────────────────
     lowStockThreshold: { type: Number, default: 5 },

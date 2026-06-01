@@ -40,7 +40,7 @@ app.use(compression()); // Enable Gzip/Brotli compression
 // CORS configured once below after helmet — DO NOT add a second cors() call
 
 const errorHandler = require('./src/middlewares/errorHandler');
-const { defaultLimiter } = require('./src/middlewares/rateLimiter');
+const { defaultLimiter, contactLimiter, uploadLimiter } = require('./src/middlewares/rateLimiter');
 const logger = require('./src/utils/logger');
 
 // Route imports
@@ -69,14 +69,20 @@ app.use(helmet({
       "frame-src": ["'self'", "https://*.razorpay.com", "https://razorpay.com", "https://*.google.com", "https://www.google.com"],
       "frame-ancestors": ["'self'", "https://*.razorpay.com", "https://razorpay.com"],
       "script-src": ["'self'", "https://checkout.razorpay.com", "https://*.razorpay.com", "https://*.google.com", "https://www.google.com", "https://*.gstatic.com"],
-      "img-src": ["'self'", "data:", "https://*.razorpay.com", "https://ik.imagekit.io", "https://res.cloudinary.com", "https://*.google.com", "https://api.qrserver.com", "https://images.unsplash.com", "https://placehold.co"],
+      "img-src": ["'self'", "data:", "https://*.razorpay.com", "https://ik.imagekit.io", "https://res.cloudinary.com", "https://*.google.com", "https://images.unsplash.com", "https://placehold.co"],
       "connect-src": ["'self'", "https://*.razorpay.com", "https://magizhchi-backend-28sx.onrender.com", "https://ik.imagekit.io", "https://res.cloudinary.com"],
     },
   },
 }));
-// BUG #16 FIX: Single merged cors() config — supports all origins including FRONTEND_URL env var
+const allowedOrigins = [...new Set([
+  process.env.FRONTEND_URL,
+  ...(process.env.ALLOWED_ORIGINS?.split(',') || []),
+  process.env.NODE_ENV !== 'production' ? 'http://localhost:5173' : null
+].filter(Boolean).map(origin => origin.trim()))];
+
+// BUG #16 FIX: Single merged cors() config — supports all configured frontend origins
 app.use(cors({
-  origin: (process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173']).map(o => o.trim()),
+  origin: allowedOrigins,
   credentials: true,
   optionsSuccessStatus: 200
 }));
@@ -89,13 +95,11 @@ app.use('/api/v1/payments/webhook', express.raw({ type: 'application/json' }));
 const csrfProtection = (req, res, next) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   
-  // Exclude webhooks and public routes from strict CSRF checks
-  if (req.originalUrl.includes('/webhook') || req.originalUrl.includes('/public')) return next();
+  // Webhooks are signature-verified and public API routes do not use cookie auth.
+  if (req.path === '/api/v1/payments/webhook' || req.path.startsWith('/api/v1/public/')) return next();
 
   // Validate Origin/Referer matches the configured frontend strictly
   const origin = req.headers.origin || req.headers.referer;
-  const allowedOrigins = (process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173']).map(o => o.trim());
-  
   let isValidOrigin = false;
   try {
     if (origin) {
@@ -103,7 +107,7 @@ const csrfProtection = (req, res, next) => {
       isValidOrigin = allowedOrigins.some(allowed => {
         try {
           const allowedUrl = new URL(allowed);
-          return originUrl.hostname === allowedUrl.hostname;
+          return originUrl.origin === allowedUrl.origin;
         } catch (err) {
           return false;
         }
@@ -183,13 +187,12 @@ app.use((req, res, next) => {
 });
 
 app.get('/api/v1/health', (req, res) => {
-  const { isReady, getQRLink } = require('./src/services/whatsapp.service');
+  const { isReady } = require('./src/services/whatsapp.service');
   const ready = isReady();
   res.json({ 
     success: true, 
     message: 'Magizhchi API is running', 
     whatsapp: ready ? 'Ready' : 'Not Connected',
-    qrLink: !ready ? getQRLink() : null,
     timestamp: new Date().toISOString() 
   });
 });
@@ -204,7 +207,7 @@ app.use(`${API}/admin/inventory`, protect, isStaff, require('./src/routes/invent
 app.use(`${API}/admin`, adminRoutes);
 
 app.use(`${API}/public`, publicRoutes);
-app.post(`${API}/contact`, publicController.submitContactForm); 
+app.post(`${API}/contact`, contactLimiter, publicController.submitContactForm);
 app.use(`${API}/auth`, authRoutes);
 app.use(`${API}/products`, productRoutes);
 app.use(`${API}/categories`, categoryRoutes);
@@ -218,11 +221,8 @@ app.use(`${API}/reviews`, reviewRoutes);
 app.use(`${API}/banners`, bannerRoutes);
 app.use(`${API}/users`, userRoutes);
 
-// Debug route to verify route health
-app.get(`${API}/health/procurement`, (req, res) => res.json({ status: 'active', routes: ['admin/purchases', 'admin/suppliers'] }));
-
 // ─── Utility Routes ───────────────────────────────────────────
-app.post(`${API}/upload`, protect, isAdmin, upload.single('image'), validateMimeType, async (req, res) => {
+app.post(`${API}/upload`, protect, isAdmin, uploadLimiter, upload.single('image'), validateMimeType, async (req, res) => {
   if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
   try {
     const result = await uploadToCloudinary(req.file.buffer, 'magizhchi/products');
@@ -232,29 +232,6 @@ app.post(`${API}/upload`, protect, isAdmin, upload.single('image'), validateMime
   }
 });
 // settings handled in admin routes
-
-
-
-
-
-// Diagnostic Health Check
-app.get('/api/v1/health-v2', (req, res) => {
-  try {
-    const fs = require('fs');
-    const path = require('path');
-    const version = fs.readFileSync(path.join(__dirname, 'VERSION.txt'), 'utf8').trim();
-    const isCorrectRepo = fs.existsSync(path.join(__dirname, 'IM_THE_CORRECT_REPO.txt'));
-    res.json({ 
-      status: 'online', 
-      version: version, 
-      isCorrectRepo: isCorrectRepo,
-      timestamp: new Date().toISOString() 
-    });
-  } catch (err) {
-    res.json({ status: 'online', version: 'V2-PENDING', error: err.message });
-  }
-});
-
 // ─── 404 Handler ──────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ success: false, message: `Route ${req.originalUrl} not found` });

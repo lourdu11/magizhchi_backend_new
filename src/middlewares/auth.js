@@ -53,21 +53,13 @@ const authorize = (...roles) => {
     let userRole = String(req.user.role || 'guest').toLowerCase().trim();
     const allowedRoles = roles.map(r => String(r).toLowerCase().trim());
     
-    // DEV-FRIENDLY: If access denied, check DB or auto-promote in development mode
+    // Refresh the role from DB before denying access.
     if (!allowedRoles.includes(userRole)) {
       try {
         const liveUser = await User.findById(req.user._id);
-        if (liveUser) {
-          if (process.env.NODE_ENV === 'development') {
-            liveUser.role = 'admin';
-            await liveUser.save();
-            userRole = 'admin';
-            req.user.role = 'admin';
-            console.log(`[DEV ONLY] Auto-promoted user ${liveUser.email || liveUser.phone} to admin.`);
-          } else if (liveUser.role) {
-            userRole = liveUser.role.toLowerCase().trim();
-            req.user.role = liveUser.role;
-          }
+        if (liveUser?.role) {
+          userRole = liveUser.role.toLowerCase().trim();
+          req.user.role = liveUser.role;
         }
       } catch (err) {
         // Fallback to original token role

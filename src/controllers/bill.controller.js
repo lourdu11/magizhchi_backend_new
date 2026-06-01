@@ -15,6 +15,19 @@ const { clearDashboardCache } = require('./admin.controller');
 const stockService = require('../services/stockService');
 const { getIO } = require('../utils/socket');
 
+const getInventoryQuantities = items => {
+  const quantities = new Map();
+  for (const item of items) {
+    const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
+    for (const selection of selections || []) {
+      if (!selection.inventoryId) continue;
+      const inventoryId = selection.inventoryId.toString();
+      quantities.set(inventoryId, (quantities.get(inventoryId) || 0) + Number(item.quantity));
+    }
+  }
+  return quantities;
+};
+
 // ── POST /bills ───────────────────────────────────────────────────────────────
 exports.createBill = async (req, res, next) => {
   const tx = await startTransactionSession();
@@ -45,11 +58,24 @@ exports.createBill = async (req, res, next) => {
 
     if (!items || items.length === 0) {
       await tx.abortTransaction();
+      await tx.endSession();
       return ApiResponse.error(res, 'Bill must have at least one item', 400);
     }
 
     const billItems = [];
     let subtotalInPaise = 0;
+    const requestedDiscount = Number(discount);
+    const requestedRoundOff = Number(roundOff);
+    if (!Number.isFinite(requestedDiscount) || requestedDiscount < 0) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Discount must be a non-negative number', 400);
+    }
+    if (!Number.isFinite(requestedRoundOff) || Math.abs(requestedRoundOff) > 1) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Round-off adjustment must be between -1 and 1', 400);
+    }
 
     // ─── OPTIMIZED BATCH FETCH ───
     const itemsToFetch = [];
@@ -61,7 +87,9 @@ exports.createBill = async (req, res, next) => {
       }
     });
 
-    const productIds = itemsToFetch.filter(i => i.productId && mongoose.Types.ObjectId.isValid(i.productId)).map(i => (i.productId || i.productRef).toString());
+    const productIds = [...itemsToFetch, ...items]
+      .filter(i => i.productId && mongoose.Types.ObjectId.isValid(i.productId))
+      .map(i => i.productId.toString());
     const productNames = itemsToFetch.filter(i => !i.productId && !i.productRef).map(i => i.productName.trim());
     
     const inventoryIds = itemsToFetch
@@ -120,6 +148,14 @@ exports.createBill = async (req, res, next) => {
     });
 
     for (const item of items) {
+      const quantity = Number(item.quantity);
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        await tx.abortTransaction();
+        await tx.endSession();
+        return ApiResponse.error(res, `Invalid quantity for ${item.productName || 'item'}`, 400);
+      }
+      item.quantity = quantity;
+
       if (item.isCombo) {
         // Handle Combo Item
         const selectionsWithInv = [];
@@ -139,6 +175,7 @@ exports.createBill = async (req, res, next) => {
           }
           if (!invItem) {
             await tx.abortTransaction();
+            await tx.endSession();
             return ApiResponse.error(res, `Component stock not found: ${sel.productName} (${sel.size})`, 404);
           }
           const currentStock = (invItem.totalStock || 0) - (invItem.offlineSold || 0) - (invItem.onlineSold || 0) - (invItem.damaged || 0) + (invItem.returned || 0) - (invItem.reservedStock || 0);
@@ -150,7 +187,16 @@ exports.createBill = async (req, res, next) => {
           selectionsWithInv.push({ ...sel, inventoryId: invItem._id });
         }
 
-        const priceInPaise = Math.round((Number(item.price) || 0) * 100);
+        const comboProduct = item.productId ? productMap.get(item.productId.toString()) : null;
+        const comboPrice = req.user.role === 'admin'
+          ? Number(item.price)
+          : Number(comboProduct?.discountedPrice || comboProduct?.sellingPrice || 0);
+        if (!Number.isFinite(comboPrice) || comboPrice <= 0) {
+          await tx.abortTransaction();
+          await tx.endSession();
+          return ApiResponse.error(res, `Valid catalog price not found for ${item.productName}`, 400);
+        }
+        const priceInPaise = Math.round(comboPrice * 100);
         const itemTotalInPaise = priceInPaise * item.quantity;
         
         billItems.push({
@@ -212,6 +258,7 @@ exports.createBill = async (req, res, next) => {
              inventoryMap.set(invItem._id.toString(), invItem);
           } else {
              await tx.abortTransaction();
+             await tx.endSession();
              return ApiResponse.error(res, `Stock record not found for ${item.productName} (${itemSize}/${itemColor || 'Default'})`, 404);
           }
         }
@@ -223,7 +270,15 @@ exports.createBill = async (req, res, next) => {
         //   return ApiResponse.error(res, `Insufficient stock for ${item.productName}. Available: ${currentStock}`, 400);
         // }
 
-        const priceInPaise = Math.round((Number(item.price) || invItem.sellingPrice || product?.sellingPrice || 0) * 100);
+        const approvedPrice = req.user.role === 'admin'
+          ? Number(item.price || invItem.sellingPrice || product?.discountedPrice || product?.sellingPrice || 0)
+          : Number(invItem.sellingPrice || product?.discountedPrice || product?.sellingPrice || 0);
+        if (!Number.isFinite(approvedPrice) || approvedPrice <= 0) {
+          await tx.abortTransaction();
+          await tx.endSession();
+          return ApiResponse.error(res, `Valid catalog price not found for ${item.productName}`, 400);
+        }
+        const priceInPaise = Math.round(approvedPrice * 100);
         const itemTotalInPaise = priceInPaise * item.quantity;
         
         let taxableValueInPaise = itemTotalInPaise;
@@ -267,66 +322,91 @@ exports.createBill = async (req, res, next) => {
       billNumber = `MAG-${currentYear}-${String(seq).padStart(3, '0')}`;
     }
 
-    // ── 3. RESERVE & COMMIT STOCK (Atomic Cascade) ──
     const billId = new mongoose.Types.ObjectId();
+
+    // Pricing calculation
+    let discAmtInPaise = Math.round(requestedDiscount * 100);
+    if (discountType === 'percentage') {
+       discAmtInPaise = Math.round((subtotalInPaise * requestedDiscount) / 100);
+    } else if (discountType === 'offer') {
+       discAmtInPaise = requestedDiscount > 0 ? Math.round(requestedDiscount * 100) : subtotalInPaise;
+    }
+
+    if (subtotalInPaise <= 0 || discAmtInPaise > subtotalInPaise) {
+       await tx.abortTransaction();
+       await tx.endSession();
+       return ApiResponse.error(res, 'Discount cannot exceed the bill subtotal', 400);
+    }
+
+    const totalDiscountPercent = (discAmtInPaise / subtotalInPaise) * 100;
+    const itemDiscountCaps = billItems.flatMap(item => item.isCombo
+      ? item.comboSelections.map(selection => inventoryMap.get(selection.inventoryId.toString())?.maxDiscountPercent ?? 50)
+      : [inventoryMap.get(item.inventoryId.toString())?.maxDiscountPercent ?? 50]);
+    const allowedDiscountPercent = req.user.role === 'admin' ? 100 : Math.min(...itemDiscountCaps, 50);
+    if (totalDiscountPercent > allowedDiscountPercent) {
+       await tx.abortTransaction();
+       await tx.endSession();
+       return ApiResponse.error(res, `Discount exceeds the allowed ${allowedDiscountPercent}% limit`, 400);
+    }
+
+    const totalAmountInPaise = subtotalInPaise - discAmtInPaise + Math.round(requestedRoundOff * 100);
+    if (totalAmountInPaise < 0) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Bill total cannot be negative', 400);
+    }
+    const toPaise = value => Math.round((Number(value) || 0) * 100);
+    const normalizedPaymentDetails = paymentMethod === 'split'
+      ? {
+          cashAmount: toPaise(paymentDetails?.cashAmount),
+          cardAmount: toPaise(paymentDetails?.cardAmount),
+          upiAmount: toPaise(paymentDetails?.upiAmount),
+          upiTransactionId: paymentDetails?.upiTransactionId
+        }
+      : {
+          cashAmount: paymentMethod === 'cash' ? totalAmountInPaise : 0,
+          cardAmount: paymentMethod === 'card' ? totalAmountInPaise : 0,
+          upiAmount: ['upi', 'gpay', 'phonepe'].includes(paymentMethod) ? totalAmountInPaise : 0,
+          upiTransactionId: paymentDetails?.upiTransactionId
+        };
+    if (paymentMethod === 'split' && normalizedPaymentDetails.cashAmount + normalizedPaymentDetails.cardAmount + normalizedPaymentDetails.upiAmount !== totalAmountInPaise) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Split payment amounts must equal the bill total', 400);
+    }
+
+    // ── 3. COMMIT STOCK (Atomic Cascade) ──
     const affectedProductIds = new Set();
-    
     for (const item of billItems) {
-      if (item.isCombo) {
-        // Combo Stock Cascade: Decrement each component's inventory
-        for (const sel of item.comboSelections || []) {
-          try {
-            const result = await StockService.commitDirectOfflineSale(
-              sel.inventoryId,
-              item.quantity,
-              billNumber,
-              billId,
-              req.user._id,
-              session
-            );
-            if (result.productRef) affectedProductIds.add(result.productRef.toString());
-          } catch (err) {
-            await tx.abortTransaction();
-            return ApiResponse.error(res, `Stock Error: ${err.message}`, 400);
-          }
-        }
-        // Also add the combo product itself to sync list
-        if (item.productId) affectedProductIds.add(item.productId.toString());
-      } else {
-        // Standalone Stock: Direct decrement
-        try {
-          const result = await StockService.commitDirectOfflineSale(
-            item.inventoryId,
-            item.quantity,
-            billNumber,
-            billId,
-            req.user._id,
-            session
-          );
-          if (result.productRef) affectedProductIds.add(result.productRef.toString());
-        } catch (err) {
-          await tx.abortTransaction();
-          return ApiResponse.error(res, `Stock Error: ${err.message}`, 400);
-        }
+      if (item.isCombo && item.productId) affectedProductIds.add(item.productId.toString());
+    }
+    const requestedQuantitiesByInventory = getInventoryQuantities(billItems);
+    for (const [inventoryId, quantity] of requestedQuantitiesByInventory) {
+      const inventory = inventoryMap.get(inventoryId);
+      if (!inventory || inventory.availableStock < quantity) {
+        await tx.abortTransaction();
+        await tx.endSession();
+        return ApiResponse.error(res, `Insufficient stock. Available: ${inventory?.availableStock || 0}`, 400);
+      }
+    }
+    for (const [inventoryId, quantity] of requestedQuantitiesByInventory) {
+      try {
+        const result = await StockService.commitDirectOfflineSale(
+          inventoryId,
+          quantity,
+          billNumber,
+          billId,
+          req.user._id,
+          session
+        );
+        if (result.productRef) affectedProductIds.add(result.productRef.toString());
+      } catch (err) {
+        await tx.abortTransaction();
+        await tx.endSession();
+        return ApiResponse.error(res, `Stock Error: ${err.message}`, 400);
       }
     }
 
-    // Pricing calculation
-    let discAmtInPaise = Math.round(Number(discount) * 100);
-    if (discountType === 'percentage') {
-       discAmtInPaise = Math.round((subtotalInPaise * Number(discount)) / 100);
-    } else if (discountType === 'offer') {
-       discAmtInPaise = Number(discount) > 0 ? Math.round(Number(discount) * 100) : subtotalInPaise;
-    }
-
-    // TASK 3: Global Discount Cap Check (Simplified: check if total discount % exceeds a reasonable threshold like 50% if not specified)
-    const totalDiscountPercent = (discAmtInPaise / subtotalInPaise) * 100;
-    if (totalDiscountPercent > 99 && discountType !== 'offer') {
-       await tx.abortTransaction();
-       return ApiResponse.error(res, 'Suspiciously high global discount. Use Offer mode for 100% off.', 400);
-    }
-
-    const totalAmountInPaise = subtotalInPaise - discAmtInPaise + Math.round(Number(roundOff) * 100);
     const gstAmountInPaise = billItems.reduce((sum, i) => sum + (i.cgst + i.sgst), 0);
 
     // Commission
@@ -349,11 +429,11 @@ exports.createBill = async (req, res, next) => {
         discount: discAmtInPaise, 
         discountType,
         gstAmount: gstAmountInPaise, 
-        roundOff: Math.round(Number(roundOff) * 100),
+        roundOff: Math.round(requestedRoundOff * 100),
         totalAmount: totalAmountInPaise 
       },
       paymentMethod,
-      paymentDetails: paymentDetails || {},
+      paymentDetails: normalizedPaymentDetails,
       shopInfo,
       notes,
       idempotencyKey: idempotencyKey || (manualBillNumber && manualBillNumber.startsWith('OFFLINE-') ? manualBillNumber : undefined),
@@ -591,12 +671,19 @@ exports.updateBill = async (req, res, next) => {
     const bill = await (session ? Bill.findById(req.params.id).session(session) : Bill.findById(req.params.id));
     if (!bill) {
       await tx.abortTransaction();
+      await tx.endSession();
       return ApiResponse.notFound(res, 'Bill not found');
     }
 
     if (bill.status === 'voided') {
       await tx.abortTransaction();
+      await tx.endSession();
       return ApiResponse.error(res, 'Cannot edit a voided bill', 400);
+    }
+    if (req.user.role === 'staff' && bill.staffId.toString() !== req.user._id.toString()) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.forbidden(res, 'Staff can edit only their own bills');
     }
 
     let { 
@@ -607,28 +694,38 @@ exports.updateBill = async (req, res, next) => {
 
     if (!items || items.length === 0) {
       await tx.abortTransaction();
+      await tx.endSession();
       return ApiResponse.error(res, 'Bill must have at least one item', 400);
     }
 
-    // 1. REVERSE PREVIOUS STOCK (Within session)
-    for (const item of bill.items) {
-      const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
-      for (const target of selections) {
-        if (target.inventoryId) {
-          await StockService.rollbackSale(
-            target.inventoryId, 
-            item.quantity, 
-            'offline', 
-            `Bill Modified (Reversal): ${bill.billNumber}`, 
-            req.user._id, 
-            session
-          );
-        }
+    if (customerDetails?.phone) {
+      customerDetails.phone = normalizePhone(customerDetails.phone);
+    }
+    const requestedDiscount = Number(discount);
+    const requestedRoundOff = Number(roundOff);
+    if (!Number.isFinite(requestedDiscount) || requestedDiscount < 0) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Discount must be a non-negative number', 400);
+    }
+    if (!Number.isFinite(requestedRoundOff) || Math.abs(requestedRoundOff) > 1) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Round-off adjustment must be between -1 and 1', 400);
+    }
+    for (const item of items) {
+      const quantity = Number(item.quantity);
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        await tx.abortTransaction();
+        await tx.endSession();
+        return ApiResponse.error(res, `Invalid quantity for ${item.productName || 'item'}`, 400);
       }
+      item.quantity = quantity;
     }
 
     const billItems = [];
     let subtotalInPaise = 0;
+    const previousQuantitiesByInventory = getInventoryQuantities(bill.items);
 
     // ─── OPTIMIZED BATCH FETCH ───
     const itemsToFetch = [];
@@ -640,8 +737,13 @@ exports.updateBill = async (req, res, next) => {
       }
     });
 
-    const productIds = itemsToFetch.filter(i => i.productId && mongoose.Types.ObjectId.isValid(i.productId)).map(i => (i.productId || i.productRef).toString());
+    const productIds = [...itemsToFetch, ...items]
+      .filter(i => i.productId && mongoose.Types.ObjectId.isValid(i.productId))
+      .map(i => i.productId.toString());
     const productNames = itemsToFetch.filter(i => !i.productId && !i.productRef).map(i => i.productName.trim());
+    const inventoryIds = itemsToFetch
+      .filter(i => i.inventoryId && mongoose.Types.ObjectId.isValid(i.inventoryId))
+      .map(i => i.inventoryId.toString());
     
     const inventoryQueryOr = itemsToFetch.map(i => ({
       productName: (i.productName || '').trim(),
@@ -654,8 +756,8 @@ exports.updateBill = async (req, res, next) => {
         ? Product.find({ $or: [{ _id: { $in: productIds } }, { name: { $in: productNames.map(n => new RegExp('^' + n + '$', 'i')) } }] }).session(session)
         : Product.find({ $or: [{ _id: { $in: productIds } }, { name: { $in: productNames.map(n => new RegExp('^' + n + '$', 'i')) } }] }),
       session
-        ? Inventory.find({ $or: inventoryQueryOr }).session(session)
-        : Inventory.find({ $or: inventoryQueryOr })
+        ? Inventory.find({ $or: [{ _id: { $in: inventoryIds } }, ...inventoryQueryOr] }).session(session)
+        : Inventory.find({ $or: [{ _id: { $in: inventoryIds } }, ...inventoryQueryOr] })
     ]);
 
     const productMap = new Map();
@@ -667,6 +769,7 @@ exports.updateBill = async (req, res, next) => {
     const inventoryMap = new Map();
     inventoryBatch.forEach(inv => {
       const key = `${inv.productName.toLowerCase()}|${inv.size}|${inv.color}`;
+      inventoryMap.set(inv._id.toString(), inv);
       inventoryMap.set(key, inv);
     });
 
@@ -676,20 +779,31 @@ exports.updateBill = async (req, res, next) => {
         const selectionsWithInv = [];
         for (const sel of item.comboSelections || []) {
           const invKey = `${sel.productName.toLowerCase()}|${sel.size}|${sel.color}`;
-          const invItem = inventoryMap.get(invKey);
+          const invItem = (sel.inventoryId && inventoryMap.get(sel.inventoryId.toString())) || inventoryMap.get(invKey);
           if (!invItem) {
             await tx.abortTransaction();
+            await tx.endSession();
             return ApiResponse.error(res, `Component stock not found: ${sel.productName}`, 404);
           }
-          const currentStock = (invItem.totalStock || 0) - (invItem.offlineSold || 0) - (invItem.onlineSold || 0) - (invItem.damaged || 0) + (invItem.returned || 0) - (invItem.reservedStock || 0);
+          const currentStock = (invItem.availableStock || 0) + (previousQuantitiesByInventory.get(invItem._id.toString()) || 0);
           if (currentStock < item.quantity) {
             await tx.abortTransaction();
+            await tx.endSession();
             return ApiResponse.error(res, `Insufficient stock for combo component: ${sel.productName}. Available: ${currentStock}`, 400);
           }
           selectionsWithInv.push({ ...sel, inventoryId: invItem._id });
         }
 
-        const priceInPaise = Math.round((Number(item.price) || 0) * 100);
+        const comboProduct = item.productId ? productMap.get(item.productId.toString()) : null;
+        const comboPrice = req.user.role === 'admin'
+          ? Number(item.price)
+          : Number(comboProduct?.discountedPrice || comboProduct?.sellingPrice || 0);
+        if (!Number.isFinite(comboPrice) || comboPrice <= 0) {
+          await tx.abortTransaction();
+          await tx.endSession();
+          return ApiResponse.error(res, `Valid catalog price not found for ${item.productName}`, 400);
+        }
+        const priceInPaise = Math.round(comboPrice * 100);
         const itemTotalInPaise = priceInPaise * item.quantity;
         
         billItems.push({
@@ -719,20 +833,30 @@ exports.updateBill = async (req, res, next) => {
         }
 
         const invKey = `${itemProductName.toLowerCase()}|${itemSize}|${itemColor}`;
-        const invItem = inventoryMap.get(invKey);
+        const invItem = (item.inventoryId && inventoryMap.get(item.inventoryId.toString())) || inventoryMap.get(invKey);
 
         if (!invItem) {
           await tx.abortTransaction();
+          await tx.endSession();
           return ApiResponse.error(res, `Stock record not found for ${item.productName}`, 404);
         }
 
-        const currentStock = (invItem.totalStock || 0) - (invItem.offlineSold || 0) - (invItem.onlineSold || 0) - (invItem.damaged || 0) + (invItem.returned || 0) - (invItem.reservedStock || 0);
+        const currentStock = (invItem.availableStock || 0) + (previousQuantitiesByInventory.get(invItem._id.toString()) || 0);
         if (currentStock < item.quantity) {
           await tx.abortTransaction();
+          await tx.endSession();
           return ApiResponse.error(res, `Insufficient stock for ${item.productName}. Available: ${currentStock}`, 400);
         }
 
-        const priceInPaise = Math.round((Number(item.price) || invItem.sellingPrice || product?.sellingPrice || 0) * 100);
+        const approvedPrice = req.user.role === 'admin'
+          ? Number(item.price || invItem.sellingPrice || product?.discountedPrice || product?.sellingPrice || 0)
+          : Number(invItem.sellingPrice || product?.discountedPrice || product?.sellingPrice || 0);
+        if (!Number.isFinite(approvedPrice) || approvedPrice <= 0) {
+          await tx.abortTransaction();
+          await tx.endSession();
+          return ApiResponse.error(res, `Valid catalog price not found for ${item.productName}`, 400);
+        }
+        const priceInPaise = Math.round(approvedPrice * 100);
         const itemTotalInPaise = priceInPaise * item.quantity;
         
         let taxableValueInPaise = itemTotalInPaise;
@@ -767,42 +891,96 @@ exports.updateBill = async (req, res, next) => {
       }
     }
 
-    // ── COMMIT NEW STOCK DEDUCTIONS ──
-    for (const item of billItems) {
-      const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
-      for (const target of selections) {
-        try {
-          await StockService.commitDirectOfflineSale(
-            target.inventoryId, 
-            item.quantity, 
-            bill.billNumber, 
-            bill._id,
-            req.user._id, 
-            session
-          );
-        } catch (err) {
-          await tx.abortTransaction();
-          return ApiResponse.error(res, `Stock Error: ${err.message}`, 400);
+    // Pricing calculation
+    let discAmtInPaise = Math.round(requestedDiscount * 100);
+    if (discountType === 'percentage') {
+       discAmtInPaise = Math.round((subtotalInPaise * requestedDiscount) / 100);
+    } else if (discountType === 'offer') {
+       discAmtInPaise = requestedDiscount > 0 ? Math.round(requestedDiscount * 100) : subtotalInPaise;
+    }
+
+    if (subtotalInPaise <= 0 || discAmtInPaise > subtotalInPaise) {
+       await tx.abortTransaction();
+       await tx.endSession();
+       return ApiResponse.error(res, 'Discount cannot exceed the bill subtotal', 400);
+    }
+
+    const totalDiscountPercent = (discAmtInPaise / subtotalInPaise) * 100;
+    const itemDiscountCaps = billItems.flatMap(item => item.isCombo
+      ? item.comboSelections.map(selection => inventoryMap.get(selection.inventoryId.toString())?.maxDiscountPercent ?? 50)
+      : [inventoryMap.get(item.inventoryId.toString())?.maxDiscountPercent ?? 50]);
+    const allowedDiscountPercent = req.user.role === 'admin' ? 100 : Math.min(...itemDiscountCaps, 50);
+    if (totalDiscountPercent > allowedDiscountPercent) {
+       await tx.abortTransaction();
+       await tx.endSession();
+       return ApiResponse.error(res, `Discount exceeds the allowed ${allowedDiscountPercent}% limit`, 400);
+    }
+
+    const totalAmountInPaise = subtotalInPaise - discAmtInPaise + Math.round(requestedRoundOff * 100);
+    if (totalAmountInPaise < 0) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Bill total cannot be negative', 400);
+    }
+    const toPaise = value => Math.round((Number(value) || 0) * 100);
+    const normalizedPaymentDetails = paymentMethod === 'split'
+      ? {
+          cashAmount: toPaise(paymentDetails?.cashAmount),
+          cardAmount: toPaise(paymentDetails?.cardAmount),
+          upiAmount: toPaise(paymentDetails?.upiAmount),
+          upiTransactionId: paymentDetails?.upiTransactionId
         }
+      : {
+          cashAmount: paymentMethod === 'cash' ? totalAmountInPaise : 0,
+          cardAmount: paymentMethod === 'card' ? totalAmountInPaise : 0,
+          upiAmount: ['upi', 'gpay', 'phonepe'].includes(paymentMethod) ? totalAmountInPaise : 0,
+          upiTransactionId: paymentDetails?.upiTransactionId
+        };
+    if (paymentMethod === 'split' && normalizedPaymentDetails.cashAmount + normalizedPaymentDetails.cardAmount + normalizedPaymentDetails.upiAmount !== totalAmountInPaise) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Split payment amounts must equal the bill total', 400);
+    }
+
+    // ── REVERSE PREVIOUS STOCK AND COMMIT NEW DEDUCTIONS ──
+    const requestedQuantitiesByInventory = getInventoryQuantities(billItems);
+    for (const [inventoryId, quantity] of requestedQuantitiesByInventory) {
+      const inventory = inventoryMap.get(inventoryId);
+      const availableAfterReversal = (inventory?.availableStock || 0) + (previousQuantitiesByInventory.get(inventoryId) || 0);
+      if (!inventory || availableAfterReversal < quantity) {
+        await tx.abortTransaction();
+        await tx.endSession();
+        return ApiResponse.error(res, `Insufficient stock. Available after bill reversal: ${availableAfterReversal}`, 400);
+      }
+    }
+    for (const [inventoryId, quantity] of previousQuantitiesByInventory) {
+      await StockService.rollbackSale(
+        inventoryId,
+        quantity,
+        'offline',
+        `Bill Modified (Reversal): ${bill.billNumber}`,
+        req.user._id,
+        session
+      );
+    }
+
+    for (const [inventoryId, quantity] of requestedQuantitiesByInventory) {
+      try {
+        await StockService.commitDirectOfflineSale(
+          inventoryId,
+          quantity,
+          bill.billNumber,
+          bill._id,
+          req.user._id,
+          session
+        );
+      } catch (err) {
+        await tx.abortTransaction();
+        await tx.endSession();
+        return ApiResponse.error(res, `Stock Error: ${err.message}`, 400);
       }
     }
 
-    // Pricing calculation
-    let discAmtInPaise = Math.round(Number(discount) * 100);
-    if (discountType === 'percentage') {
-       discAmtInPaise = Math.round((subtotalInPaise * Number(discount)) / 100);
-    } else if (discountType === 'offer') {
-       discAmtInPaise = Number(discount) > 0 ? Math.round(Number(discount) * 100) : subtotalInPaise;
-    }
-
-    // TASK 3: Global Discount Cap Check
-    const totalDiscountPercent = (discAmtInPaise / subtotalInPaise) * 100;
-    if (totalDiscountPercent > 99 && discountType !== 'offer') {
-       await tx.abortTransaction();
-       return ApiResponse.error(res, 'Suspiciously high global discount. Use Offer mode for 100% off.', 400);
-    }
-
-    const totalAmountInPaise = subtotalInPaise - discAmtInPaise + Math.round(Number(roundOff) * 100);
     const gstAmountInPaise = billItems.reduce((sum, i) => sum + (i.cgst + i.sgst), 0);
 
     const actualSalesStaffId = salesStaffId || bill.salesStaffId || req.user._id;
@@ -820,11 +998,11 @@ exports.updateBill = async (req, res, next) => {
       discount: discAmtInPaise, 
       discountType,
       gstAmount: gstAmountInPaise, 
-      roundOff: Math.round(Number(roundOff) * 100),
+      roundOff: Math.round(requestedRoundOff * 100),
       totalAmount: totalAmountInPaise 
     };
     bill.paymentMethod = paymentMethod;
-    bill.paymentDetails = paymentDetails || {};
+    bill.paymentDetails = normalizedPaymentDetails;
     bill.shopInfo = shopInfo;
     bill.notes = notes || bill.notes;
 

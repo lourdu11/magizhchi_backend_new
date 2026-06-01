@@ -6,6 +6,7 @@ const Category = require('../models/Category');
 const Order = require('../models/Order');
 const Bill = require('../models/Bill');
 const StockMovement = require('../models/StockMovement');
+const Supplier = require('../models/Supplier');
 const { getIO } = require('../utils/socket');
 const { logAudit } = require('../utils/auditLogger');
 const logger = require('../utils/logger');
@@ -251,6 +252,9 @@ class SyncService {
         }
       } catch (e) { session = null; }
     }
+    if (!session && process.env.NODE_ENV === 'production') {
+      throw new Error('Database transactions are required for procurement sync in production.');
+    }
     logger.info(`[SyncService DEBUG] Session exists: ${!!session}, Is in transaction: ${session?.inTransaction ? session.inTransaction() : 'N/A'}`);
 
     try {
@@ -320,6 +324,7 @@ class SyncService {
 
         // ── C. VARIANT & INVENTORY SYNC ──
         const variantData = await this._syncVariantAndInventory(product, item, purchase, userId, session);
+        await this.syncProductStock(product._id, session);
         
         io.emit('STOCK_UPDATED', { 
           productId: product._id, 
@@ -361,6 +366,9 @@ class SyncService {
         session = null;
       }
     } catch (e) { session = null; }
+    if (!session && process.env.NODE_ENV === 'production') {
+      throw new Error('Database transactions are required for procurement rollback in production.');
+    }
 
     try {
       const purchase = await (session ? Purchase.findById(purchaseId).session(session) : Purchase.findById(purchaseId));
@@ -440,6 +448,19 @@ class SyncService {
       }
 
       // Finalize Purchase Archival
+      if (purchase.supplierId && purchase.status === 'received') {
+        const impactAmount = purchase.pricing.manualFinancialImpact !== null && purchase.pricing.manualFinancialImpact !== undefined
+          ? Number(purchase.pricing.manualFinancialImpact)
+          : Number(purchase.pricing.totalAmount);
+        await Supplier.findByIdAndUpdate(purchase.supplierId, {
+          $inc: {
+            totalPurchaseAmount: -impactAmount,
+            totalPaidAmount: -(Number(purchase.paidAmount) || 0)
+          },
+          $pull: { payments: { referenceId: purchase.purchaseNumber } }
+        }, session ? { session } : {});
+      }
+
       purchase.isDeleted = true;
       purchase.deletedAt = new Date();
       purchase.deletedBy = userId;
@@ -485,7 +506,7 @@ class SyncService {
       inv.totalStock -= item.quantity;
       const sQtyToReduce = Math.min(inv.availableStock, item.quantity);
       inv.availableStock -= sQtyToReduce;
-      
+
       // Auto-Cleanup logic
       if (inv.totalStock <= 0) {
         const historyQuery = { 
@@ -874,13 +895,33 @@ class SyncService {
   async _syncVariantAndInventory(product, item, purchase, userId, session) {
     const barcode = item.barcode || `MAG${Date.now().toString().slice(-8)}${Math.floor(Math.random()*100).toString().padStart(2, '0')}`;
     const sku = item.sku || `${product.name.slice(0,3)}-${item.color?.slice(0,3)}-${item.size}`.toUpperCase().replace(/\s+/g, '');
+    const invQuery = { productName: product.name, size: item.size, color: item.color };
+    const existingInventory = await (session
+      ? Inventory.findOne(invQuery).session(session)
+      : Inventory.findOne(invQuery));
+    let quantityToApply = Number(item.quantity) || 0;
+    if (existingInventory) {
+      const movementAggregate = StockMovement.aggregate([
+        {
+          $match: {
+            inventoryId: existingInventory._id,
+            referenceId: purchase._id,
+            type: { $in: ['purchase', 'audit_correction'] }
+          }
+        },
+        { $group: { _id: null, quantity: { $sum: '$quantity' } } }
+      ]);
+      if (session) movementAggregate.session(session);
+      const [movementBalance] = await movementAggregate;
+      quantityToApply = Math.max(0, quantityToApply - (Number(movementBalance?.quantity) || 0));
+    }
 
     // 1. Update Product Variant Array (Atomic Upsert Pattern)
     const existingVariant = product.variants.find(v => v.size === item.size && v.color === item.color);
     
     if (existingVariant) {
       const variantUpdate = {
-        $inc: { "variants.$[elem].totalStock": item.quantity },
+        $inc: { "variants.$[elem].totalStock": quantityToApply },
         $set: { "variants.$[elem].isDeleted": false }
       };
       await (session 
@@ -899,8 +940,8 @@ class SyncService {
         color: item.color,
         sku,
         barcode,
-        totalStock: item.quantity,
-        available: item.quantity,
+        totalStock: quantityToApply,
+        available: quantityToApply,
         price: item.sellingPrice || product.sellingPrice
       };
       await (session 
@@ -909,11 +950,10 @@ class SyncService {
     }
 
     // 2. Update/Create Inventory (Traceable Source Mapping)
-    const invQuery = { productName: product.name, size: item.size, color: item.color };
     const invUpdate = {
         $inc: { 
-          totalStock: Number(item.quantity) || 0,
-          availableStock: Number(item.quantity) || 0
+          totalStock: quantityToApply,
+          availableStock: quantityToApply
         },
         $set: {
           productRef: product._id,
@@ -940,20 +980,22 @@ class SyncService {
       : Inventory.findOneAndUpdate(invQuery, invUpdate, { upsert: true, new: true }));
 
     // 3. Log Movement
-    const movement = new StockMovement({
-      inventoryId: inv._id,
-      productId: product._id,
-      variant: { size: item.size, color: item.color },
-      type: 'purchase',
-      quantity: item.quantity,
-      reason: `Procurement Bill: ${purchase.purchaseNumber}`,
-      performedBy: userId,
-      referenceId: purchase._id,
-      stockBefore: inv.totalStock - item.quantity,
-      stockAfter: inv.totalStock
-    });
-    
-    await (session ? movement.save({ session }) : movement.save());
+    if (quantityToApply > 0) {
+      const movement = new StockMovement({
+        inventoryId: inv._id,
+        productId: product._id,
+        variant: { size: item.size, color: item.color },
+        type: 'purchase',
+        quantity: quantityToApply,
+        reason: `Procurement Bill: ${purchase.purchaseNumber}`,
+        performedBy: userId,
+        referenceId: purchase._id,
+        stockBefore: inv.totalStock - quantityToApply,
+        stockAfter: inv.totalStock
+      });
+
+      await (session ? movement.save({ session }) : movement.save());
+    }
 
     return { inventoryId: inv._id, sku, newStock: inv.totalStock };
   }

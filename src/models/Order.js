@@ -60,6 +60,7 @@ const orderSchema = new mongoose.Schema(
       couponDiscount: { type: Number, default: 0 },
       gstAmount: { type: Number, default: 0 },
       shippingCharges: { type: Number, default: 0 },
+      codCharges: { type: Number, default: 0 },
       totalAmount: { type: Number, required: true },
     },
     shippingAddress: addressSnapshot,
@@ -80,7 +81,9 @@ const orderSchema = new mongoose.Schema(
       razorpaySignature: String,
       transactionId: String,
       paidAt: Date,
+      webhookCaptured: { type: Boolean, default: false },
     },
+    checkoutAccessToken: { type: String, select: false },
     orderStatus: {
       type: String,
       enum: ['placed', 'confirmed', 'processing', 'shipped', 'out_for_delivery', 'delivered', 'cancelled', 'returned'],

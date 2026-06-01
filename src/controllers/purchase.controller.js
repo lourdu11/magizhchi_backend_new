@@ -11,6 +11,52 @@ const stockService = require('../services/stockService');
 const { clearDashboardCache } = require('./admin.controller');
 const { logAudit } = require('../utils/auditLogger');
 
+const normalizeManualFinancialImpact = value => {
+  if (value === null || value === undefined || value === '') return null;
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) {
+    const error = new Error('Manual financial impact must be a non-negative number');
+    error.statusCode = 400;
+    throw error;
+  }
+  return amount;
+};
+
+const getSupplierImpact = (purchase) => Number(
+  purchase.pricing.manualFinancialImpact !== null && purchase.pricing.manualFinancialImpact !== undefined
+    ? Number(purchase.pricing.manualFinancialImpact)
+    : Number(purchase.pricing.totalAmount)
+);
+
+const getSupplierLedgerRollback = (purchase) => ({
+  $inc: {
+    totalPurchaseAmount: -getSupplierImpact(purchase),
+    totalPaidAmount: -(Number(purchase.paidAmount) || 0)
+  },
+  $pull: { payments: { referenceId: purchase.purchaseNumber } }
+});
+
+const getSupplierLedgerApply = (purchase) => {
+  const update = {
+    $inc: {
+      totalPurchaseAmount: getSupplierImpact(purchase),
+      totalPaidAmount: Number(purchase.paidAmount) || 0
+    }
+  };
+  if (Number(purchase.paidAmount) > 0) {
+    update.$push = {
+      payments: {
+        amount: Number(purchase.paidAmount),
+        method: 'Purchase Settlement',
+        referenceId: purchase.purchaseNumber,
+        note: `Direct payment for ${purchase.purchaseNumber}`,
+        date: purchase.purchaseDate || new Date()
+      }
+    };
+  }
+  return update;
+};
+
 // ── POST /admin/purchases ─────────────────────────────────────────────────────
 exports.createPurchase = async (req, res, next) => {
   try {
@@ -18,6 +64,10 @@ exports.createPurchase = async (req, res, next) => {
 
     if (!items || items.length === 0) {
       return ApiResponse.error(res, 'At least one item is required', 400);
+    }
+    const normalizedPaidAmount = Number(paidAmount || 0);
+    if (!Number.isFinite(normalizedPaidAmount) || normalizedPaidAmount < 0) {
+      return ApiResponse.error(res, 'Paid amount must be a non-negative number', 400);
     }
 
     // 1. Generate Purchase Number (ERP Sequential ID)
@@ -67,6 +117,9 @@ exports.createPurchase = async (req, res, next) => {
     }
     const gstAmount = parseFloat(totalGst.toFixed(2));
     const totalAmount = parseFloat((subtotal + gstAmount).toFixed(2));
+    if (normalizedPaidAmount > totalAmount) {
+      return ApiResponse.error(res, 'Paid amount cannot exceed the purchase total', 400);
+    }
 
     // 3. Save purchase bill
     const purchase = await Purchase.create({
@@ -79,10 +132,10 @@ exports.createPurchase = async (req, res, next) => {
         subtotal, 
         gstAmount, 
         totalAmount,
-        manualFinancialImpact: req.body.pricing?.manualFinancialImpact ?? null 
+        manualFinancialImpact: normalizeManualFinancialImpact(req.body.pricing?.manualFinancialImpact)
       },
       status:       status || 'received',
-      paidAmount:   Number(paidAmount) || 0,
+      paidAmount:   normalizedPaidAmount,
       paymentStatus: paymentStatus || 'pending',
       purchaseDate:  purchaseDate || new Date(),
       notes,
@@ -94,27 +147,7 @@ exports.createPurchase = async (req, res, next) => {
     if (purchase.status === 'received') {
       // A. Update Supplier Ledger
       if (supplierId) {
-        const impactAmount = purchase.pricing.manualFinancialImpact !== null ? purchase.pricing.manualFinancialImpact : totalAmount;
-        const supplierUpdate = {
-          $inc: { 
-            totalPurchaseAmount: impactAmount,
-            totalPaidAmount: Number(paidAmount) || 0 
-          }
-        };
-
-        if (Number(paidAmount) > 0) {
-          supplierUpdate.$push = { 
-            payments: { 
-              amount: Number(paidAmount), 
-              method: 'Purchase Settlement', 
-              referenceId: purchaseNumber, 
-              note: `Direct payment for ${purchaseNumber}`,
-              date: purchaseDate || new Date() 
-            }
-          };
-        }
-
-        await Supplier.findByIdAndUpdate(supplierId, supplierUpdate);
+        await Supplier.findByIdAndUpdate(supplierId, getSupplierLedgerApply(purchase));
       }
 
       // B. Update Inventory & Catalog Master via Enterprise Sync Service
@@ -128,9 +161,7 @@ exports.createPurchase = async (req, res, next) => {
         });
         // Rollback supplier ledger update
         if (supplierId) {
-          await Supplier.findByIdAndUpdate(supplierId, {
-            $inc: { totalPurchaseAmount: -totalAmount, totalPaidAmount: -(Number(paidAmount) || 0) }
-          });
+          await Supplier.findByIdAndUpdate(supplierId, getSupplierLedgerRollback(purchase));
         }
         return ApiResponse.error(res, `Purchase saved but inventory sync failed: ${syncErr.message}. Purchase set to draft — please re-submit.`, 500);
       }
@@ -163,6 +194,27 @@ exports.updatePurchase = async (req, res, next) => {
     if (!oldPurchase) return ApiResponse.notFound(res, 'Purchase not found');
 
     const { supplierId, supplierName, billNumber, paymentStatus, status, paidAmount, purchaseDate, notes, items, billImage } = req.body;
+    const normalizedPaidAmount = paidAmount === undefined ? Number(oldPurchase.paidAmount || 0) : Number(paidAmount);
+    if (!Number.isFinite(normalizedPaidAmount) || normalizedPaidAmount < 0) {
+      return ApiResponse.error(res, 'Paid amount must be a non-negative number', 400);
+    }
+    if (req.body.pricing?.manualFinancialImpact !== undefined) {
+      normalizeManualFinancialImpact(req.body.pricing.manualFinancialImpact);
+    }
+    if (items !== undefined && (!Array.isArray(items) || items.length === 0 || !items.some(item => item.productName && item.size && Number(item.quantity) > 0))) {
+      return ApiResponse.error(res, 'Cannot update to an empty bill. Add at least one valid item.', 400);
+    }
+    const projectedTotal = Array.isArray(items)
+      ? items
+          .filter(item => item.productName && item.size && Number(item.quantity) > 0)
+          .reduce((sum, item) => {
+            const lineTotal = Number(item.quantity) * (Number(item.costPrice) || 0);
+            return sum + lineTotal + lineTotal * ((Number(item.gstPercent) || 5) / 100);
+          }, 0)
+      : Number(oldPurchase.pricing.totalAmount);
+    if (normalizedPaidAmount > projectedTotal) {
+      return ApiResponse.error(res, 'Paid amount cannot exceed the purchase total', 400);
+    }
 
     const tx = await startTransactionSession();
     const session = tx.session;
@@ -174,12 +226,7 @@ exports.updatePurchase = async (req, res, next) => {
         
         // Rollback Supplier Ledger
         if (oldPurchase.supplierId) {
-          await Supplier.findByIdAndUpdate(oldPurchase.supplierId, {
-            $inc: { 
-              totalPurchaseAmount: -oldPurchase.pricing.totalAmount,
-              totalPaidAmount: -oldPurchase.paidAmount
-            }
-          }).session(session);
+          await Supplier.findByIdAndUpdate(oldPurchase.supplierId, getSupplierLedgerRollback(oldPurchase)).session(session);
         }
       }
 
@@ -209,7 +256,8 @@ exports.updatePurchase = async (req, res, next) => {
         // Auto-resolve productId
         let productId = item.productId || null;
         if (!productId) {
-          const product = await Product.findOne({ name: { $regex: new RegExp('^' + item.productName.trim() + '$', 'i') } });
+          const escapedName = item.productName.trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+          const product = await Product.findOne({ name: { $regex: new RegExp('^' + escapedName + '$', 'i') } });
           productId = product ? product._id : null;
         }
 
@@ -222,6 +270,7 @@ exports.updatePurchase = async (req, res, next) => {
       }
       
       if (validItems.length === 0) {
+        await tx.abortTransaction();
         return ApiResponse.error(res, 'Cannot update to an empty bill. Add at least one valid item.', 400);
       }
 
@@ -232,29 +281,35 @@ exports.updatePurchase = async (req, res, next) => {
         subtotal, 
         gstAmount, 
         totalAmount: parseFloat((subtotal + gstAmount).toFixed(2)),
-        manualFinancialImpact: req.body.pricing?.manualFinancialImpact ?? oldPurchase.pricing.manualFinancialImpact 
+        manualFinancialImpact: req.body.pricing?.manualFinancialImpact !== undefined
+          ? normalizeManualFinancialImpact(req.body.pricing.manualFinancialImpact)
+          : oldPurchase.pricing.manualFinancialImpact
       };
     } else if (items && items.length === 0) {
+       await tx.abortTransaction();
        return ApiResponse.error(res, 'Purchase bill cannot be empty', 400);
     } else {
       // If items not provided but manual impact is
       if (req.body.pricing?.manualFinancialImpact !== undefined) {
         pricing = {
           ...oldPurchase.pricing,
-          manualFinancialImpact: req.body.pricing.manualFinancialImpact
+          manualFinancialImpact: normalizeManualFinancialImpact(req.body.pricing.manualFinancialImpact)
         };
       }
     }
 
     // 3. Update Purchase Record
     const updatedPurchase = await Purchase.findByIdAndUpdate(id, {
-      billNumber, supplierName, supplierId, paymentStatus, status, paidAmount, purchaseDate, notes,
+      billNumber, supplierName, supplierId, paymentStatus, status, paidAmount: normalizedPaidAmount, purchaseDate, notes,
       items: processedItems,
       pricing,
       billImage
     }, { new: true, session });
 
     if (!updatedPurchase) throw new Error('Failed to update purchase record');
+    if (normalizedPaidAmount > updatedPurchase.pricing.totalAmount) {
+      throw Object.assign(new Error('Paid amount cannot exceed the purchase total'), { statusCode: 400 });
+    }
 
     // 4. Apply new stock if status is received
     if (updatedPurchase.status === 'received') {
@@ -264,13 +319,7 @@ exports.updatePurchase = async (req, res, next) => {
 
       // Apply to Supplier Ledger
       if (updatedPurchase.supplierId) {
-        const impactAmount = updatedPurchase.pricing.manualFinancialImpact !== null ? updatedPurchase.pricing.manualFinancialImpact : updatedPurchase.pricing.totalAmount;
-        await Supplier.findByIdAndUpdate(updatedPurchase.supplierId, {
-          $inc: { 
-            totalPurchaseAmount: impactAmount,
-            totalPaidAmount: Number(paidAmount) || 0 
-          }
-        }).session(session);
+        await Supplier.findByIdAndUpdate(updatedPurchase.supplierId, getSupplierLedgerApply(updatedPurchase)).session(session);
       }
     }
 
@@ -514,13 +563,7 @@ exports.restorePurchase = async (req, res, next) => {
 
       // 2. Re-apply to Supplier Ledger
       if (purchase.supplierId && purchase.status === 'received') {
-        const impactAmount = purchase.pricing.manualFinancialImpact !== null ? purchase.pricing.manualFinancialImpact : purchase.pricing.totalAmount;
-        await Supplier.findByIdAndUpdate(purchase.supplierId, {
-          $inc: { 
-            totalPurchaseAmount: impactAmount,
-            totalPaidAmount: purchase.paidAmount || 0 
-          }
-        }).session(session);
+        await Supplier.findByIdAndUpdate(purchase.supplierId, getSupplierLedgerApply(purchase)).session(session);
       }
 
       // 3. Re-sync to Catalog & Inventory

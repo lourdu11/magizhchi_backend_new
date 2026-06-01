@@ -6,7 +6,7 @@ const {
     initAuthCreds,
     BufferJSON
 } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const path = require('path');
 const pino = require('pino');
 const fs = require('fs');
@@ -36,6 +36,7 @@ let isReady = false;
 let isInitializing = false;
 let lastInitTime = 0;
 let currentQR = null;
+let currentQRDataUrl = null;
 let reconnectTimeout = null;
 
 /**
@@ -219,8 +220,8 @@ const initWhatsApp = async () => {
 
         if (qr) {
             currentQR = qr;
-            const qrLink = `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}&size=300x300`;
-            logger.info(`🔗 WhatsApp QR: ${qrLink}`);
+            currentQRDataUrl = await QRCode.toDataURL(qr, { width: 300, margin: 1 });
+            logger.info('WhatsApp QR refreshed for authenticated admin access.');
         }
 
         if (connection === 'close') {
@@ -497,7 +498,7 @@ process.on('SIGTERM', () => {});
 const getStatus = () => ({
     ready: isReady,
     initializing: isInitializing,
-    qr: currentQR ? `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(currentQR)}&size=300x300` : null
+    qr: currentQR ? currentQRDataUrl : null
 });
 
 module.exports = {
@@ -512,7 +513,6 @@ module.exports = {
     sendProductNotificationToAdmin,
     sendStockAlertToAdmin,
     isReady: () => isReady,
-    getQRLink: () => currentQR ? `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(currentQR)}&size=300x300` : null,
     closeWhatsApp,
     clearSessionFromDb,
     getStatus,

@@ -5,12 +5,56 @@ const StockMovement = require('../models/StockMovement');
 const { getIO } = require('../utils/socket');
 const logger = require('../utils/logger');
 
+const requirePositiveQuantity = (qty) => {
+  const quantity = Number(qty);
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new Error('Stock quantity must be a positive integer');
+  }
+  return quantity;
+};
+
+const getReservationQuantityExpr = (orderId, quantity) => ({
+  $expr: {
+    $eq: [
+      {
+        $sum: {
+          $map: {
+            input: {
+              $filter: {
+                input: '$reservations',
+                as: 'reservation',
+                cond: {
+                  $eq: ['$$reservation.orderId', new mongoose.Types.ObjectId(orderId.toString())]
+                }
+              }
+            },
+            as: 'reservation',
+            in: '$$reservation.quantity'
+          }
+        }
+      },
+      quantity
+    ]
+  }
+});
+
 /**
  * Magizhchi Enterprise Stock Engine
  * Central authority for all inventory movements.
  * Ensures atomicity, consistency, and audit integrity.
  */
 class StockService {
+  async _refreshReservationExpiry(inv, session = null) {
+    const nextExpiry = inv.reservations.length > 0
+      ? inv.reservations.reduce((earliest, reservation) => (
+          !earliest || reservation.expiresAt < earliest ? reservation.expiresAt : earliest
+        ), null)
+      : null;
+
+    inv.reservationExpiresAt = nextExpiry;
+    await inv.save(session ? { session } : {});
+    return inv;
+  }
   
   /**
    * 1. RESERVE STOCK (Online Order Placed)
@@ -22,7 +66,7 @@ class StockService {
     const expiryMinutes = 20; // Enterprise Default
     const expiresAt = new Date(Date.now() + expiryMinutes * 60000);
 
-    const reservationQty = Number(qty);
+    const reservationQty = requirePositiveQuantity(qty);
     
     const inv = await Inventory.findOneAndUpdate(
       { 
@@ -36,8 +80,7 @@ class StockService {
         },
         $push: { 
           reservations: { orderId, quantity: reservationQty, expiresAt } 
-        },
-        $set: { reservationExpiresAt: expiresAt }
+        }
       },
       { session, new: true }
     );
@@ -50,6 +93,8 @@ class StockService {
         throw new Error(`Insufficient stock for ${existing.productName || 'product'}. Available: ${existing.availableStock || 0}`);
       }
     }
+
+    await this._refreshReservationExpiry(inv, session);
 
     // 🚀 SINGLE SOURCE OF TRUTH: Trigger Unified Sync
     const SyncService = require('./sync.service');
@@ -64,18 +109,24 @@ class StockService {
    * Moves stock from 'reservedStock' to 'onlineSold'.
    */
   async commitOnlineSale(inventoryId, qty, orderId, session = null) {
-    logger.info(`[StockEngine] Committing Online Sale: ${qty} units for Inv: ${inventoryId}`);
+    const quantity = requirePositiveQuantity(qty);
+    logger.info(`[StockEngine] Committing Online Sale: ${quantity} units for Inv: ${inventoryId}`);
 
     const inv = await Inventory.findOneAndUpdate(
-      { _id: inventoryId, reservedStock: { $gte: qty } },
+      {
+        _id: inventoryId,
+        reservedStock: { $gte: quantity },
+        ...getReservationQuantityExpr(orderId, quantity)
+      },
       { 
-        $inc: { reservedStock: -qty, onlineSold: qty },
+        $inc: { reservedStock: -quantity, onlineSold: quantity },
         $pull: { reservations: { orderId } }
       },
       { session, new: true }
     );
 
-    if (!inv) throw new Error('Inventory record lost during commit');
+    if (!inv) throw new Error('Inventory reservation missing during online sale commit');
+    await this._refreshReservationExpiry(inv, session);
 
     // 🚀 SINGLE SOURCE OF TRUTH: Trigger Unified Sync
     const SyncService = require('./sync.service');
@@ -87,7 +138,7 @@ class StockService {
       productId: inv.productRef,
       variant: { size: inv.size, color: inv.color },
       type: 'sale_online',
-      quantity: qty,
+      quantity,
       reason: 'Online Order Committed',
       referenceId: orderId
     }], { session });
@@ -101,12 +152,13 @@ class StockService {
    * Moves stock from 'reserved' to 'offlineSold'.
    */
   async commitOfflineSale(inventoryId, qty, billNumber, billId, userId, session = null) {
-    logger.info(`[StockEngine] Committing POS Sale from Reservation: ${qty} units for Inv: ${inventoryId}`);
+    const quantity = requirePositiveQuantity(qty);
+    logger.info(`[StockEngine] Committing POS Sale from Reservation: ${quantity} units for Inv: ${inventoryId}`);
 
     const inv = await Inventory.findOneAndUpdate(
-      { _id: inventoryId, reservedStock: { $gte: qty } },
+      { _id: inventoryId, reservedStock: { $gte: quantity } },
       { 
-        $inc: { reservedStock: -qty, offlineSold: qty },
+        $inc: { reservedStock: -quantity, offlineSold: quantity },
         $pull: { reservations: { orderId: billId } }
       },
       { session, new: true }
@@ -124,7 +176,7 @@ class StockService {
       productId: inv.productRef,
       variant: { size: inv.size, color: inv.color },
       type: 'sale_pos',
-      quantity: qty,
+      quantity,
       reason: `POS Sale Committed: ${billNumber}`,
       referenceId: billId,
       referenceModel: 'Bill',
@@ -136,15 +188,17 @@ class StockService {
   }
 
   async commitDirectOfflineSale(inventoryId, qty, billNumber, billId, userId, session = null) {
-    logger.info(`[StockEngine] Committing Direct POS Sale: ${qty} units for Inv: ${inventoryId}`);
+    const quantity = requirePositiveQuantity(qty);
+    logger.info(`[StockEngine] Committing Direct POS Sale: ${quantity} units for Inv: ${inventoryId}`);
 
     const inv = await Inventory.findOneAndUpdate(
       { 
         _id: inventoryId, 
-        isDeleted: { $ne: true }
+        isDeleted: { $ne: true },
+        availableStock: { $gte: quantity }
       },
       { 
-        $inc: { availableStock: -qty, offlineSold: qty }
+        $inc: { availableStock: -quantity, offlineSold: quantity }
       },
       { session, new: true }
     );
@@ -161,7 +215,7 @@ class StockService {
       productId: inv.productRef,
       variant: { size: inv.size, color: inv.color },
       type: 'sale_pos',
-      quantity: qty,
+      quantity,
       reason: `POS Sale: ${billNumber}`,
       referenceId: billId,
       referenceModel: 'Bill',
@@ -177,18 +231,24 @@ class StockService {
    * Frees 'reservedStock' back to available pool.
    */
   async releaseReservation(inventoryId, qty, orderId, session = null) {
-    logger.info(`[StockEngine] Releasing Reservation: ${qty} units for Inv: ${inventoryId} (Order: ${orderId})`);
+    const quantity = requirePositiveQuantity(qty);
+    logger.info(`[StockEngine] Releasing Reservation: ${quantity} units for Inv: ${inventoryId} (Order: ${orderId})`);
 
     const inv = await Inventory.findOneAndUpdate(
-      { _id: inventoryId, reservedStock: { $gte: qty } },
+      {
+        _id: inventoryId,
+        reservedStock: { $gte: quantity },
+        ...getReservationQuantityExpr(orderId, quantity)
+      },
       { 
-        $inc: { reservedStock: -qty, availableStock: qty },
+        $inc: { reservedStock: -quantity, availableStock: quantity },
         $pull: { reservations: { orderId } }
       },
       { session, new: true }
     );
 
-    if (!inv) throw new Error('Inventory record lost during release');
+    if (!inv) throw new Error('Inventory reservation missing during release');
+    await this._refreshReservationExpiry(inv, session);
 
     // 🚀 SINGLE SOURCE OF TRUTH: Trigger Unified Sync
     const SyncService = require('./sync.service');
@@ -203,16 +263,14 @@ class StockService {
    * Reverses sold quantity back to available pool (via totalStock/sold reduction or 'returned' increase)
    */
   async rollbackSale(inventoryId, qty, channel = 'offline', reason = 'Return/Void', userId, session = null) {
-    const update = channel === 'online' 
-      ? { $inc: { onlineSold: -qty } } 
-      : { $inc: { offlineSold: -qty } };
+    const quantity = requirePositiveQuantity(qty);
 
     const inv = await Inventory.findOneAndUpdate(
-      { _id: inventoryId, [channel === 'online' ? 'onlineSold' : 'offlineSold']: { $gte: qty } },
+      { _id: inventoryId, [channel === 'online' ? 'onlineSold' : 'offlineSold']: { $gte: quantity } },
       { 
         $inc: { 
-          ...(channel === 'online' ? { onlineSold: -qty } : { offlineSold: -qty }),
-          availableStock: qty 
+          ...(channel === 'online' ? { onlineSold: -quantity } : { offlineSold: -quantity }),
+          availableStock: quantity
         } 
       },
       { session, new: true }
@@ -230,7 +288,7 @@ class StockService {
       productId: inv.productRef,
       variant: { size: inv.size, color: inv.color },
       type: 'return_customer',
-      quantity: qty,
+      quantity,
       reason: `Rollback (${channel}): ${reason}`,
       performedBy: userId
     }], { session });
@@ -252,26 +310,43 @@ class StockService {
 
     if (invsWithExpired.length === 0) return { releasedCount: 0 };
 
+    const Order = require('../models/Order');
+    const expiredOrderIds = [...new Set(invsWithExpired.flatMap(inv =>
+      inv.reservations
+        .filter(reservation => reservation.expiresAt <= now && reservation.orderId)
+        .map(reservation => reservation.orderId.toString())
+    ))];
+    const expiringOrders = await Order.find({ _id: { $in: expiredOrderIds } });
+    const orderMap = new Map(expiringOrders.map(order => [order._id.toString(), order]));
+    const releasableOrderIds = new Set(expiringOrders
+      .filter(order => order.orderStatus === 'placed' && order.paymentStatus === 'pending')
+      .map(order => order._id.toString()));
+
     let totalReleased = 0;
     for (const inv of invsWithExpired) {
       const expired = inv.reservations.filter(r => r.expiresAt <= now);
       if (expired.length === 0) continue;
 
-      const qtyToRelease = expired.reduce((sum, r) => sum + r.quantity, 0);
+      const qtyToRelease = expired.reduce((sum, reservation) => {
+        const orderId = reservation.orderId?.toString();
+        const order = orderId ? orderMap.get(orderId) : null;
+        return !order || releasableOrderIds.has(orderId) ? sum + reservation.quantity : sum;
+      }, 0);
       
-      // Update inventory atomically
-      const updated = await Inventory.findByIdAndUpdate(inv._id, {
-        $inc: { reservedStock: -qtyToRelease, availableStock: qtyToRelease },
-        $pull: { reservations: { expiresAt: { $lte: now } } }
-      }, { new: true });
-
-      // Recalculate next expiry
-      if (updated.reservations.length > 0) {
-        updated.reservationExpiresAt = updated.reservations.sort((a,b) => a.expiresAt - b.expiresAt)[0].expiresAt;
-      } else {
-        updated.reservationExpiresAt = null;
+      const update = { $pull: { reservations: { expiresAt: { $lte: now } } } };
+      if (qtyToRelease > 0) {
+        update.$inc = { reservedStock: -qtyToRelease, availableStock: qtyToRelease };
       }
-      await updated.save();
+      const updated = await Inventory.findOneAndUpdate(
+        { _id: inv._id, ...(qtyToRelease > 0 ? { reservedStock: { $gte: qtyToRelease } } : {}) },
+        update,
+        { new: true }
+      );
+      if (!updated) {
+        logger.error(`[StockEngine] Could not safely release expired reservations for ${inv._id}`);
+        continue;
+      }
+      await this._refreshReservationExpiry(updated);
 
       // Sync Profile
       if (updated.productRef) {
@@ -283,27 +358,26 @@ class StockService {
       totalReleased += qtyToRelease;
 
       // 🛡️ ORDER LIFECYCLE SYNC: Cancel the orders associated with these reservations
-      for (const resv of expired) {
-        if (resv.orderId) {
-          const Order = require('../models/Order');
-          const order = await Order.findById(resv.orderId);
-          if (order && order.orderStatus === 'placed' && order.paymentStatus === 'pending') {
-            order.orderStatus = 'cancelled';
-            order.cancelReason = 'Stock Reservation Expired';
-            order.statusHistory.push({
-              status: 'cancelled',
-              updatedAt: new Date(),
-              note: 'Automatically cancelled by StockEngine: Reservation expired.'
-            });
-            await order.save();
-            logger.info(`[StockEngine] Cancelled Order ${order.orderNumber} due to expiry`);
-          }
-        }
-      }
-
-      totalReleased += qtyToRelease;
-      this._emitUpdate(updated);
       logger.info(`[StockEngine] Released ${qtyToRelease} units for ${updated.productName} (${updated.sku})`);
+    }
+
+    for (const orderId of releasableOrderIds) {
+      const order = orderMap.get(orderId);
+      const stillReserved = await Inventory.exists({ 'reservations.orderId': order._id });
+      if (stillReserved) {
+        logger.warn(`[StockEngine] Order ${order.orderNumber} still has reservations and was not cancelled yet`);
+        continue;
+      }
+      order.orderStatus = 'cancelled';
+      order.paymentStatus = 'failed';
+      order.cancelReason = 'Stock Reservation Expired';
+      order.statusHistory.push({
+        status: 'cancelled',
+        updatedAt: new Date(),
+        note: 'Automatically cancelled by StockEngine: reservation expired.'
+      });
+      await order.save();
+      logger.info(`[StockEngine] Cancelled Order ${order.orderNumber} due to expiry`);
     }
 
     return { releasedCount: totalReleased };
@@ -313,25 +387,38 @@ class StockService {
    * 5. PAYMENT FAILURE ROLLBACK
    * Manual trigger when payment gateway returns failure.
    */
-  async paymentFailureRollback(orderId) {
-    const invs = await Inventory.find({ 'reservations.orderId': orderId });
+  async paymentFailureRollback(orderId, session = null) {
+    const query = Inventory.find({ 'reservations.orderId': orderId });
+    if (session) query.session(session);
+    const invs = await query;
+    let releasedCount = 0;
     for (const inv of invs) {
-      const reservation = inv.reservations.find(r => r.orderId.toString() === orderId.toString());
-      if (reservation) {
-        const qty = reservation.quantity;
-        const updated = await Inventory.findByIdAndUpdate(inv._id, {
+      const reservations = inv.reservations.filter(r => r.orderId.toString() === orderId.toString());
+      if (reservations.length > 0) {
+        const qty = reservations.reduce((sum, reservation) => sum + reservation.quantity, 0);
+        const updated = await Inventory.findOneAndUpdate({
+          _id: inv._id,
+          reservedStock: { $gte: qty },
+          ...getReservationQuantityExpr(orderId, qty)
+        }, {
           $inc: { reservedStock: -qty, availableStock: qty },
-          $pull: { reservations: { orderId } },
-          $set: { reservationExpiresAt: null } // Simplified, next save will fix
-        }, { new: true });
+          $pull: { reservations: { orderId } }
+        }, { session, new: true });
 
+        if (!updated) {
+          throw new Error(`Could not safely roll back reservation for inventory ${inv._id}`);
+        }
+        await this._refreshReservationExpiry(updated, session);
         if (updated.productRef) {
-          await this._syncToProduct(updated.productRef, updated.size, updated.color, { reserved: -qty });
+          const SyncService = require('./sync.service');
+          await SyncService.syncProductStock(updated.productRef, session);
         }
         this._emitUpdate(updated);
+        releasedCount += qty;
         logger.info(`[StockEngine] Rollback: Released ${qty} units for Order ${orderId}`);
       }
     }
+    return releasedCount;
   }
 
   /**

@@ -64,8 +64,8 @@ exports.trackOrder = async (req, res, next) => {
   try {
     const { orderNumber, phone } = req.body;
 
-    if (!orderNumber && !phone) {
-      return ApiResponse.error(res, 'Please enter Order Number or Phone Number', 400);
+    if (!orderNumber || !phone) {
+      return ApiResponse.error(res, 'Order number and phone number are required', 400);
     }
 
     let query = {};
@@ -76,27 +76,24 @@ exports.trackOrder = async (req, res, next) => {
 
     if (phone) {
       const cleanPhone = phone.replace(/\D/g, '').slice(-10);
+      if (cleanPhone.length !== 10) {
+        return ApiResponse.error(res, 'Enter a valid 10-digit phone number', 400);
+      }
       const phoneQuery = {
         $or: [
-          { 'shippingAddress.phone': { $regex: cleanPhone } },
-          { 'guestDetails.phone': { $regex: cleanPhone } },
-          { 'billingAddress.phone': { $regex: cleanPhone } }
+          { 'shippingAddress.phone': cleanPhone },
+          { 'guestDetails.phone': cleanPhone },
+          { 'billingAddress.phone': cleanPhone }
         ]
       };
 
-      if (orderNumber) {
-        // If both provided, keep it strict for better security
-        query = { ...query, ...phoneQuery };
-      } else {
-        // If only phone provided, search by phone
-        query = phoneQuery;
-      }
+      query = { ...query, ...phoneQuery };
     }
 
     // Find the latest order matching the criteria
     const order = await Order.findOne(query)
       .sort({ createdAt: -1 })
-      .select('-userId -paymentDetails.razorpaySignature -statusHistory.updatedBy');
+      .select('-userId -paymentDetails -statusHistory.updatedBy -checkoutAccessToken');
 
     if (!order) {
       return ApiResponse.error(res, 'No matching order found', 404);
@@ -111,9 +108,14 @@ exports.trackOrder = async (req, res, next) => {
 exports.getPublicOrderDetails = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const { token } = req.query;
 
-    const order = await Order.findById(id)
-      .select('-userId -paymentDetails.razorpaySignature -statusHistory.updatedBy');
+    if (!token) {
+      return ApiResponse.error(res, 'Order access token is required', 403);
+    }
+
+    const order = await Order.findOne({ _id: id, checkoutAccessToken: token })
+      .select('-userId -paymentDetails -statusHistory.updatedBy -checkoutAccessToken');
 
     if (!order) {
       return ApiResponse.error(res, 'Order not found', 404);
@@ -122,24 +124,5 @@ exports.getPublicOrderDetails = async (req, res, next) => {
     return ApiResponse.success(res, { order });
   } catch (e) {
     next(e);
-  }
-};
-
-exports.testBrevoEndpoint = async (req, res) => {
-  try {
-    const { sendAdminOrderNotificationEmail } = require('../services/email.service');
-    const dummyOrder = {
-      _id: '507f1f77bcf86cd799439011',
-      orderNumber: 'TEST-ORDER-BREVO',
-      shippingAddress: { name: 'Diagnostic Test', phone: '0000000000' },
-      pricing: { totalAmount: 1 },
-      paymentMethod: 'TEST',
-      items: [{ productName: 'Diagnostic Ping', variant: { size: 'N/A', color: 'N/A' }, quantity: 1 }]
-    };
-
-    const response = await sendAdminOrderNotificationEmail(dummyOrder);
-    res.json({ success: true, message: 'Brevo API was successfully hit. If you didn\'t receive the email, it is in your Spam folder, or your Brevo account is in Sandbox mode.', brevoRawResponse: response });
-  } catch (err) {
-    res.json({ success: false, error: err.message, stack: err.stack });
   }
 };

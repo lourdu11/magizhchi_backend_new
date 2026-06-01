@@ -3,6 +3,7 @@ const r = express.Router();
 const c = require('../controllers/review.controller');
 const { protect, isAdmin } = require('../middlewares/auth');
 const { upload, validateMimeType, uploadToCloudinary } = require('../middlewares/upload.middleware');
+const { uploadLimiter } = require('../middlewares/rateLimiter');
 
 // Public
 r.get('/product/:productId', c.getProductReviews);
@@ -10,7 +11,7 @@ r.get('/stats/:productId', c.getReviewStats);
 
 // User
 r.post('/create', protect, c.createReview);
-r.post('/upload', protect, upload.array('images', 5), validateMimeType, async (req, res) => {
+r.post('/upload', protect, uploadLimiter, upload.array('images', 5), validateMimeType, async (req, res) => {
   if (!req.files || req.files.length === 0) return res.status(400).json({ success: false, message: 'No images uploaded' });
   
   try {

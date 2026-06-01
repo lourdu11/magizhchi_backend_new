@@ -563,7 +563,8 @@ exports.createInventoryItem = async (req, res, next) => {
       offlineEnabled: offlineEnabled !== false,
       productRef: finalProductRef || null,
       images,
-      totalStock: stockToInit 
+      totalStock: stockToInit,
+      availableStock: stockToInit
     });
 
     // Create movement record for manual init

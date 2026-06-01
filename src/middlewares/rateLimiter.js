@@ -19,9 +19,15 @@ const authLimiter = rateLimit({
 });
 
 const otpLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000,
-  max: 100,
-  message: { success: false, message: 'Too many OTP requests. Wait 5 minutes before retrying.' },
+  windowMs: 10 * 60 * 1000,
+  max: 5,
+  message: { success: false, message: 'Too many OTP requests. Wait 10 minutes before retrying.' },
+});
+
+const contactLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { success: false, message: 'Too many contact requests. Please try again later.' },
 });
 
 const uploadLimiter = rateLimit({
@@ -30,4 +36,4 @@ const uploadLimiter = rateLimit({
   message: { success: false, message: 'Too many upload requests.' },
 });
 
-module.exports = { defaultLimiter, authLimiter, otpLimiter, uploadLimiter };
+module.exports = { defaultLimiter, authLimiter, otpLimiter, contactLimiter, uploadLimiter };

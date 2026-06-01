@@ -40,6 +40,9 @@ async function checkTransactionSupport() {
 async function startTransactionSession() {
   const supported = await checkTransactionSupport();
   if (!supported) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('Database transactions are required in production. Configure MongoDB as a replica set or use Atlas.');
+    }
     return {
       session: null,
       inTransaction: () => false,
@@ -71,6 +74,9 @@ async function startTransactionSession() {
     };
   } catch (err) {
     logger.error('Failed to start transaction session:', err.message);
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('Could not start the required database transaction.');
+    }
     return {
       session: null,
       inTransaction: () => false,

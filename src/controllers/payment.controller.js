@@ -1,10 +1,27 @@
 const crypto = require('crypto');
 const Order = require('../models/Order');
+const Cart = require('../models/Cart');
 const Inventory = require('../models/Inventory');
 const StockMovement = require('../models/StockMovement');
 const { sendOrderConfirmationEmail } = require('../services/email.service');
 const { sendOrderNotificationToAdmin } = require('../services/whatsapp.service');
 const logger = require('../utils/logger');
+const { startTransactionSession } = require('../utils/transaction');
+
+const confirmStockSale = async (items, orderId, session = null) => {
+  const StockService = require('../services/stock.service');
+  const quantitiesByInventory = new Map();
+  for (const item of items) {
+    const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
+    for (const selection of selections) {
+      const inventoryId = selection.inventoryId.toString();
+      quantitiesByInventory.set(inventoryId, (quantitiesByInventory.get(inventoryId) || 0) + item.quantity);
+    }
+  }
+  for (const [inventoryId, quantity] of quantitiesByInventory) {
+    await StockService.commitOnlineSale(inventoryId, quantity, orderId, session);
+  }
+};
 
 /**
  * RAZORPAY WEBHOOK HANDLER
@@ -56,42 +73,63 @@ exports.handleWebhook = async (req, res) => {
       const razorpayOrderId = paymentEntity.order_id;
       const razorpayPaymentId = paymentEntity.id;
 
-      // Find order by Razorpay Order ID
-      const order = await Order.findOne({ 'paymentDetails.razorpayOrderId': razorpayOrderId });
+      const tx = await startTransactionSession();
+      const session = tx.session;
+      let order;
+      try {
+        const orderQuery = Order.findOne({ 'paymentDetails.razorpayOrderId': razorpayOrderId });
+        if (session) orderQuery.session(session);
+        order = await orderQuery;
 
-      if (!order) {
+        if (!order) {
+          await tx.abortTransaction();
+          await tx.endSession();
         logger.error(`❌ Webhook Error: Order not found for Razorpay Order ID: ${razorpayOrderId}`);
         return res.status(404).json({ status: 'error', message: 'Order not found' });
-      }
+        }
 
       // Idempotency check: If already completed, just return 200
-      if (order.paymentStatus === 'completed') {
+        if (order.paymentStatus === 'completed') {
+          await tx.abortTransaction();
+          await tx.endSession();
         logger.info(`ℹ️ Webhook: Order ${order.orderNumber} already marked as paid. Skipping.`);
         return res.status(200).json({ status: 'ok', message: 'Already processed' });
-      }
+        }
+
+        if (order.paymentStatus !== 'pending' || order.orderStatus !== 'placed') {
+          await tx.abortTransaction();
+          await tx.endSession();
+          return res.status(200).json({ status: 'ok', message: 'Order no longer awaiting payment' });
+        }
 
       // Update Order Status
-      order.paymentStatus = 'completed';
-      order.paymentDetails = {
-        ...order.paymentDetails,
-        razorpayPaymentId,
-        paidAt: new Date(),
-        webhookCaptured: true
-      };
+        order.paymentStatus = 'completed';
+        order.paymentDetails = {
+          ...order.paymentDetails,
+          razorpayPaymentId,
+          paidAt: new Date(),
+          webhookCaptured: true
+        };
       
       // Only move to 'confirmed' if it was still 'placed' or 'pending'
-      if (['placed', 'pending'].includes(order.orderStatus)) {
-        order.orderStatus = 'confirmed';
-        order.statusHistory.push({ status: 'confirmed', updatedAt: new Date(), note: 'Payment captured via Webhook' });
+        if (['placed', 'pending'].includes(order.orderStatus)) {
+          order.orderStatus = 'confirmed';
+          order.statusHistory.push({ status: 'confirmed', updatedAt: new Date(), note: 'Payment captured via Webhook' });
         
-        // Confirm Stock Sale via Hardened StockService
-        const StockService = require('../services/stock.service');
-        for (const item of order.items) {
-           await StockService.commitOnlineSale(item.inventoryId, item.quantity, order._id);
+          await confirmStockSale(order.items, order._id, session);
         }
-      }
 
-      await order.save();
+        await order.save(session ? { session } : {});
+        if (order.userId) {
+          await Cart.findOneAndUpdate({ userId: order.userId }, { items: [] }, session ? { session } : {});
+        }
+        await tx.commitTransaction();
+        await tx.endSession();
+      } catch (error) {
+        await tx.abortTransaction();
+        await tx.endSession();
+        throw error;
+      }
       logger.info(`✅ Webhook: Order ${order.orderNumber} successfully updated to PAID.`);
 
       // Send Notifications
@@ -107,18 +145,30 @@ exports.handleWebhook = async (req, res) => {
     if (event === 'payment.failed') {
       const paymentEntity = payload.payment.entity;
       const razorpayOrderId = paymentEntity.order_id;
+      const tx = await startTransactionSession();
+      const session = tx.session;
       
-      const order = await Order.findOne({ 'paymentDetails.razorpayOrderId': razorpayOrderId });
-      if (order && order.paymentStatus === 'pending') {
+      try {
+        const orderQuery = Order.findOne({ 'paymentDetails.razorpayOrderId': razorpayOrderId });
+        if (session) orderQuery.session(session);
+        const order = await orderQuery;
+        if (order && order.paymentStatus === 'pending') {
          logger.warn(`🛑 Webhook: Payment failed for Order ${order.orderNumber}. Rolling back stock.`);
          const StockService = require('../services/stock.service');
-         await StockService.paymentFailureRollback(order._id);
+         await StockService.paymentFailureRollback(order._id, session);
          
          order.paymentStatus = 'failed';
          order.orderStatus = 'cancelled';
          order.cancelReason = 'Payment Failed (Webhook)';
          order.statusHistory.push({ status: 'cancelled', updatedAt: new Date(), note: 'Payment failed at gateway.' });
-         await order.save();
+         await order.save(session ? { session } : {});
+        }
+        await tx.commitTransaction();
+      } catch (error) {
+        await tx.abortTransaction();
+        throw error;
+      } finally {
+        await tx.endSession();
       }
     }
 

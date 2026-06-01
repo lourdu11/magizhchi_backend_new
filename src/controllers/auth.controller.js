@@ -50,34 +50,21 @@ exports.login = async (req, res, next) => {
 
     const query = buildQuery(identifier);
     let user = await User.findOne(query).select('+password');
-    let isNewUser = false;
+    const isNewUser = false;
 
     // ── First-time login → auto-create account ────────────────
     if (!user) {
-      const userData = {
-        name: autoName(identifier),
-        password,
-        isVerified: false,
-        role: 'user',
-      };
-      if (isEmail(identifier)) userData.email = identifier.toLowerCase();
-      else userData.phone = identifier.replace(/\D/g, '');
-
-      user = await User.create(userData);
-      isNewUser = true;
-      logger.info(`Auto-created new user: ${identifier}`);
+      return ApiResponse.unauthorized(res, 'Account not found. Create an account first.');
     } else {
       // ── Returning user checks ─────────────────────────────────
       if (user.isBlocked)
         return ApiResponse.forbidden(res, 'Account blocked. Contact support.');
 
       // Check if account is locked (Disabled for development ease)
-      /* 
       if (user.lockUntil && user.lockUntil > Date.now()) {
         const remaining = Math.ceil((user.lockUntil - Date.now()) / 60000);
         return ApiResponse.error(res, `Too many failed attempts. Try after ${remaining} minutes.`, 423);
       }
-      */
 
       const isMatch = await user.comparePassword(password);
       if (!isMatch) {
@@ -147,6 +134,9 @@ exports.verifyAdmin2FA = async (req, res, next) => {
     const query = buildQuery(identifier);
     const user = await User.findOne(query);
     if (!user) return ApiResponse.notFound(res, 'Administrator record not found');
+    if (!['admin', 'staff'].includes(user.role)) {
+      return ApiResponse.forbidden(res, 'Administrator access is required');
+    }
 
     // 3. Issue Tokens
     const { accessToken, refreshToken } = generateTokens(user._id);
@@ -222,6 +212,9 @@ exports.sendOTPHandler = async (req, res, next) => {
     const { identifier, purpose = 'register' } = req.body;
     if (!identifier)
       return ApiResponse.error(res, 'identifier is required', 400);
+    if (purpose !== 'register') {
+      return ApiResponse.error(res, 'Unsupported OTP purpose', 400);
+    }
 
     const result = await sendOTP(identifier, purpose);
     return ApiResponse.success(res, { method: result.method }, result.message);
@@ -236,6 +229,9 @@ exports.verifyOTPHandler = async (req, res, next) => {
     const { identifier, otp, purpose = 'register' } = req.body;
     if (!identifier || !otp) {
       return ApiResponse.error(res, 'Both identifier and OTP are required', 400);
+    }
+    if (!['register', 'password_reset'].includes(purpose)) {
+      return ApiResponse.error(res, 'Unsupported OTP purpose', 400);
     }
 
     // For password reset, don't delete yet; it's needed for the final reset call
@@ -371,6 +367,46 @@ exports.changePassword = async (req, res, next) => {
     await user.save();
 
     return ApiResponse.success(res, null, 'Password changed successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.register = async (req, res, next) => {
+  try {
+    const { name, email, phone, password, otp } = req.body;
+    const identifier = email || phone;
+    if (!name?.trim() || !identifier || !password || !otp) {
+      return ApiResponse.error(res, 'Name, email or phone, password, and OTP are required', 400);
+    }
+    if (password.length < 8) {
+      return ApiResponse.error(res, 'Password must be at least 8 characters', 400);
+    }
+    if (!isEmail(identifier) && !isPhone(identifier)) {
+      return ApiResponse.error(res, 'Enter a valid email or 10-digit phone number', 400);
+    }
+
+    await verifyOTP(identifier, otp, 'register', true);
+    const query = buildQuery(identifier);
+    if (await User.exists(query)) {
+      return ApiResponse.error(res, 'An account already exists for this email or phone number', 409);
+    }
+
+    const user = await User.create({
+      name: name.trim(),
+      ...(isEmail(identifier) ? { email: identifier.toLowerCase() } : { phone: normalizePhone(identifier) }),
+      password,
+      role: 'user',
+      isVerified: true
+    });
+    const { accessToken, refreshToken } = generateTokens(user._id);
+    await User.findByIdAndUpdate(user._id, { refreshToken });
+    setCookies(res, accessToken, refreshToken);
+    logAudit({ userId: user._id, action: 'SIGNUP', module: 'AUTH', details: { identifier } });
+    return ApiResponse.created(res, {
+      user: { _id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role },
+      accessToken
+    }, 'Account created successfully');
   } catch (error) {
     next(error);
   }

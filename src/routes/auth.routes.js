@@ -5,15 +5,16 @@ const { protect } = require('../middlewares/auth');
 const { authLimiter, otpLimiter } = require('../middlewares/rateLimiter');
 
 // Public routes
-router.post('/quick-guest', authController.quickGuestUser);
-router.post('/login', authLimiter, authController.login);            // Smart login (auto-creates)
-router.post('/forgot-password', authController.forgotPassword);  // Email→Email OTP | Phone→WhatsApp
-router.post('/reset-password', authController.resetPassword);
+router.post('/quick-guest', authLimiter, authController.quickGuestUser);
+router.post('/login', authLimiter, authController.login);
+router.post('/register', otpLimiter, authController.register);
+router.post('/forgot-password', otpLimiter, authController.forgotPassword);  // Email→Email OTP | Phone→WhatsApp
+router.post('/reset-password', authLimiter, authController.resetPassword);
 router.post('/send-otp', otpLimiter, authController.sendOTPHandler);
-router.post('/verify-otp', authController.verifyOTPHandler);
-router.post('/verify-admin-2fa', authController.verifyAdmin2FA);
-router.post('/refresh-token', authController.refreshToken);
-router.post('/logout', authController.logout);
+router.post('/verify-otp', authLimiter, authController.verifyOTPHandler);
+router.post('/verify-admin-2fa', authLimiter, authController.verifyAdmin2FA);
+router.post('/refresh-token', authLimiter, authController.refreshToken);
+router.post('/logout', protect, authController.logout);
 
 // Protected routes
 router.get('/me', protect, authController.getMe);

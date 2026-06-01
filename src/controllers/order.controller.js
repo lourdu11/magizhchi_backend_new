@@ -21,6 +21,14 @@ const mongoose = require('mongoose');
 const logger = require('../utils/logger');
 const { startTransactionSession } = require('../utils/transaction');
 
+const escapeRegex = value => String(value || '').replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+
+const abortAndRespond = async (tx, respond) => {
+  await tx.abortTransaction();
+  await tx.endSession();
+  return respond();
+};
+
 exports.reserveStock = async (req, res, next) => {
   try {
     const { items } = req.body;
@@ -32,7 +40,7 @@ exports.reserveStock = async (req, res, next) => {
     for (const item of items) {
       const inv = await StockService.reserveStock(
         item.inventoryId, 
-        Number(item.quantity) || 1, 
+        Number(item.quantity),
         new mongoose.Types.ObjectId() // Dummy Order ID
       );
       results.push({
@@ -60,7 +68,10 @@ exports.createOrder = async (req, res, next) => {
     
     // TASK 7: Empty Cart Block
     if (!items || items.length === 0) {
-      return ApiResponse.error(res, 'Order must have at least one item', 400);
+      return abortAndRespond(tx, () => ApiResponse.error(res, 'Order must have at least one item', 400));
+    }
+    if (!['cod', 'razorpay'].includes(paymentMethod)) {
+      return abortAndRespond(tx, () => ApiResponse.error(res, 'Unsupported payment method', 400));
     }
 
     const settings = await Settings.findOne() || {};
@@ -68,7 +79,7 @@ exports.createOrder = async (req, res, next) => {
 
     if (paymentMethod === 'cod') {
       if (settings?.payment?.codEnabled === false) {
-        return ApiResponse.error(res, 'Cash on Delivery is currently disabled.', 400);
+        return abortAndRespond(tx, () => ApiResponse.error(res, 'Cash on Delivery is currently disabled.', 400));
       }
     }
 
@@ -92,8 +103,8 @@ exports.createOrder = async (req, res, next) => {
       const getAggregateStock = async (pRef, pName, size, color) => {
         const query = {
           $or: [
-            { productRef: pRef, size: { $regex: new RegExp(`^${size}$`, 'i') }, color: { $regex: new RegExp(`^${color}$`, 'i') } },
-            { productName: pName, size: { $regex: new RegExp(`^${size}$`, 'i') }, color: { $regex: new RegExp(`^${color}$`, 'i') } }
+            { productRef: pRef, size: { $regex: new RegExp(`^${escapeRegex(size)}$`, 'i') }, color: { $regex: new RegExp(`^${escapeRegex(color)}$`, 'i') } },
+            { productName: pName, size: { $regex: new RegExp(`^${escapeRegex(size)}$`, 'i') }, color: { $regex: new RegExp(`^${escapeRegex(color)}$`, 'i') } }
           ],
           onlineEnabled: true,
           isDeleted: false
@@ -114,7 +125,7 @@ exports.createOrder = async (req, res, next) => {
       
       console.log(`[ORDER DEBUG] Product: ${product.name}, Selling: ${product.sellingPrice}, Discounted: ${product.discountedPrice}, Final Price: ${price}`);
 
-      if (!qty || qty < 1) throw { message: `Invalid quantity for ${product.name}. Min 1 required.`, statusCode: 400 };
+      if (!Number.isInteger(qty) || qty < 1) throw { message: `Invalid quantity for ${product.name}. Min 1 required.`, statusCode: 400 };
 
       // Secure Backend Multi-Buy Promo Price calculation
       if (product.multiBuyEnabled && product.multiBuyQuantity > 0 && product.multiBuyPrice > 0) {
@@ -213,26 +224,34 @@ exports.createOrder = async (req, res, next) => {
       ? (shippingConfig.flatRateTN ?? shippingConfig.flatRate ?? 50)
       : (shippingConfig.flatRateOut ?? shippingConfig.flatRate ?? 100);
     const shipping = afterDiscount >= shippingConfig.freeShippingThreshold ? 0 : flatRate;
-    const totalAmount = parseFloat((afterDiscount + shipping).toFixed(2));
+    const codCharges = paymentMethod === 'cod' ? Number(settings?.payment?.codCharges || 0) : 0;
+    const codThreshold = Number(settings?.payment?.codThreshold ?? 50000);
+    if (paymentMethod === 'cod' && subtotal > codThreshold) {
+      return abortAndRespond(tx, () => ApiResponse.error(res, `Cash on Delivery is unavailable above Rs.${codThreshold}`, 400));
+    }
+    const totalAmount = parseFloat((afterDiscount + shipping + codCharges).toFixed(2));
 
     // 3. Final Stock Check before placement
     for (const item of orderItems) {
       if (item.isCombo) {
         for (const sel of item.comboSelections) {
            const inv = await Inventory.findById(sel.inventoryId).session(session);
+           if (!inv) throw { message: `Inventory not found for ${sel.productName}`, statusCode: 404 };
            const available = (inv.totalStock || 0) - (inv.onlineSold || 0) - (inv.offlineSold || 0) - (inv.reservedStock || 0) + (inv.returned || 0) - (inv.damaged || 0);
-           if (!inv || available < item.quantity) throw { message: `Stock just ran out for ${sel.productName} in bundle. Available: ${available}`, statusCode: 400 };
+           if (available < item.quantity) throw { message: `Stock just ran out for ${sel.productName} in bundle. Available: ${available}`, statusCode: 400 };
         }
       } else {
         const inv = await Inventory.findById(item.inventoryId).session(session);
+        if (!inv) throw { message: `Inventory not found for ${item.productName}`, statusCode: 404 };
         const available = (inv.totalStock || 0) - (inv.onlineSold || 0) - (inv.offlineSold || 0) - (inv.reservedStock || 0) + (inv.returned || 0) - (inv.damaged || 0);
-        if (!inv || available < item.quantity) throw { message: `Stock just ran out for ${item.productName}. Available: ${available}`, statusCode: 400 };
+        if (available < item.quantity) throw { message: `Stock just ran out for ${item.productName}. Available: ${available}`, statusCode: 400 };
       }
     }
 
     // 4. Razorpay order
     let razorpayOrder = null;
     if (paymentMethod === 'razorpay') {
+      if (settings?.payment?.onlineEnabled === false) throw { message: 'Online payment is currently disabled', statusCode: 400 };
       if (!isRazorpayConfigured) throw { message: 'Online payment unavailable', statusCode: 400 };
       razorpayOrder = await razorpay.orders.create({
         amount: Math.round(totalAmount * 100),
@@ -254,17 +273,19 @@ exports.createOrder = async (req, res, next) => {
       phone: shippingAddress?.phone || req.user.phone
     } : undefined);
 
+    const checkoutAccessToken = crypto.randomBytes(32).toString('hex');
     const [order] = await Order.create([{
       orderNumber: sequentialOrderNumber,
       userId: req.user?._id || null,
       isGuestOrder: isGuest,
       guestDetails: finalGuestDetails,
       items: orderItems,
-      pricing: { subtotal, couponDiscount, gstAmount: totalGst, shippingCharges: shipping, totalAmount },
+      pricing: { subtotal, couponDiscount, gstAmount: totalGst, shippingCharges: shipping, codCharges, totalAmount },
       shippingAddress, billingAddress: billingAddress || shippingAddress,
       paymentMethod,
       paymentStatus: 'pending',
       paymentDetails: razorpayOrder ? { razorpayOrderId: razorpayOrder.id } : {},
+      checkoutAccessToken,
       couponCode, notes,
       statusHistory: [{ status: 'placed', updatedAt: new Date() }],
     }], { session });
@@ -282,14 +303,7 @@ exports.createOrder = async (req, res, next) => {
 
     // 7. If COD, commit immediately.
     if (paymentMethod === 'cod') {
-      for (const item of order.items) {
-        const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
-        for (const sel of selections) {
-           await Inventory.findByIdAndUpdate(sel.inventoryId, {
-             $inc: { reservedStock: -item.quantity, onlineSold: item.quantity }
-           }, { session });
-        }
-      }
+      await confirmStockSale(order.items, order._id, session);
       order.paymentStatus = 'cod_pending';
       await order.save({ session });
     }
@@ -309,7 +323,9 @@ exports.createOrder = async (req, res, next) => {
     // ── 9. CACHE INVALIDATION ──
     clearDashboardCache();
 
-    if (req.user) await Cart.findOneAndUpdate({ userId: req.user._id }, { items: [] });
+    if (req.user && paymentMethod === 'cod') {
+      await Cart.findOneAndUpdate({ userId: req.user._id }, { items: [] });
+    }
 
     const { sendAdminOrderNotificationEmail } = require('../services/email.service');
     const orderNotif = settings.notifications?.orderNotifications || { enabled: true, method: 'both' };
@@ -325,7 +341,11 @@ exports.createOrder = async (req, res, next) => {
 
     logAudit({ req, action: 'CREATE_ORDER', module: 'ORDERS', resourceId: order._id, details: { orderNumber: order.orderNumber, total: totalAmount } });
 
-    return ApiResponse.created(res, { order: { _id: order._id, orderNumber: order.orderNumber, totalAmount }, razorpayOrder });
+    return ApiResponse.created(res, {
+      order: { _id: order._id, orderNumber: order.orderNumber, totalAmount },
+      checkoutAccessToken,
+      razorpayOrder
+    });
   } catch (error) { 
     await tx.abortTransaction();
     await tx.endSession();
@@ -337,65 +357,118 @@ exports.createOrder = async (req, res, next) => {
 };
 
 exports.verifyPayment = async (req, res, next) => {
+  const tx = await startTransactionSession();
+  const session = tx.session;
   try {
     const { orderId, razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
+    if (![orderId, razorpayOrderId, razorpayPaymentId, razorpaySignature].every(value => typeof value === 'string' && value)) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Incomplete payment verification payload', 400);
+    }
+
     const expectedSignature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(`${razorpayOrderId}|${razorpayPaymentId}`).digest('hex');
+    const actualSignatureBuffer = Buffer.from(razorpaySignature, 'utf8');
+    const expectedSignatureBuffer = Buffer.from(expectedSignature, 'utf8');
 
-    if (expectedSignature !== razorpaySignature) return ApiResponse.error(res, 'Verification failed', 400);
+    if (actualSignatureBuffer.length !== expectedSignatureBuffer.length || !crypto.timingSafeEqual(actualSignatureBuffer, expectedSignatureBuffer)) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Verification failed', 400);
+    }
 
-    const order = await Order.findById(orderId);
-    if (!order) return ApiResponse.notFound(res, 'Order not found');
+    const orderQuery = Order.findById(orderId).select('+checkoutAccessToken');
+    if (session) orderQuery.session(session);
+    const order = await orderQuery;
+    if (!order) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.notFound(res, 'Order not found');
+    }
+    if (order.paymentDetails?.razorpayOrderId !== razorpayOrderId) {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Payment does not belong to this order', 400);
+    }
+    if (order.paymentStatus === 'completed') {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.success(res, { order: { orderNumber: order.orderNumber } }, 'Payment already verified');
+    }
+    if (order.paymentStatus !== 'pending' || order.orderStatus !== 'placed') {
+      await tx.abortTransaction();
+      await tx.endSession();
+      return ApiResponse.error(res, 'Order is not awaiting payment', 409);
+    }
 
+    await confirmStockSale(order.items, order._id, session);
     order.paymentStatus = 'completed';
     order.paymentDetails = { ...order.paymentDetails, razorpayPaymentId, razorpaySignature, paidAt: new Date() };
     order.orderStatus = 'confirmed';
     order.statusHistory.push({ status: 'confirmed', updatedAt: new Date() });
-    await order.save();
-
-    await confirmStockSale(order.items, order._id);
+    await order.save(session ? { session } : {});
+    if (order.userId) {
+      await Cart.findOneAndUpdate({ userId: order.userId }, { items: [] }, session ? { session } : {});
+    }
+    await tx.commitTransaction();
+    await tx.endSession();
 
     return ApiResponse.success(res, { order: { orderNumber: order.orderNumber } }, 'Payment verified');
-  } catch (error) { next(error); }
+  } catch (error) {
+    await tx.abortTransaction();
+    await tx.endSession();
+    next(error);
+  }
 };
 
 async function confirmStockSale(items, orderId, session = null) {
-  for (const item of items) {
-    if (item.isCombo && item.comboSelections?.length) {
-      for (const sel of item.comboSelections) {
-        await StockService.commitOnlineSale(sel.inventoryId, item.quantity, orderId, session);
-      }
-    } else {
-      await StockService.commitOnlineSale(item.inventoryId, item.quantity, orderId, session);
-    }
+  const quantitiesByInventory = getInventoryQuantities(items);
+  for (const [inventoryId, quantity] of quantitiesByInventory) {
+    await StockService.commitOnlineSale(inventoryId, quantity, orderId, session);
   }
 }
 
+function getInventoryQuantities(items) {
+  const quantitiesByInventory = new Map();
+  for (const item of items) {
+    const selections = item.isCombo && item.comboSelections?.length
+      ? item.comboSelections
+      : [{ inventoryId: item.inventoryId }];
+    for (const selection of selections) {
+      const inventoryId = selection.inventoryId.toString();
+      quantitiesByInventory.set(inventoryId, (quantitiesByInventory.get(inventoryId) || 0) + item.quantity);
+    }
+  }
+  return quantitiesByInventory;
+}
+
 exports.cancelOrder = async (req, res, next) => {
+  const tx = await startTransactionSession();
+  const session = tx.session;
   try {
-    const order = await Order.findOne({ _id: req.params.id, userId: req.user._id });
+    const orderQuery = Order.findOne({ _id: req.params.id, userId: req.user._id });
+    if (session) orderQuery.session(session);
+    const order = await orderQuery;
     if (!order || !['placed', 'confirmed'].includes(order.orderStatus)) {
+      await tx.abortTransaction();
+      await tx.endSession();
       return ApiResponse.error(res, 'Cannot cancel order at this stage', 400);
     }
 
-    for (const item of order.items) {
-      const quantity = item.quantity;
-      const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId }];
-
-      for (const target of selections) {
-        if (order.orderStatus === 'placed' || order.paymentStatus === 'pending') {
-          // Stock is only reserved — release it
-          await StockService.releaseReservation(target.inventoryId, quantity, order._id);
-        } else if (order.paymentStatus === 'completed') {
-          // Stock was already committed to onlineSold — rollback it
-          await StockService.rollbackSale(target.inventoryId, quantity, 'online', 'Order Cancelled', req.user._id);
-        }
+    for (const [inventoryId, quantity] of getInventoryQuantities(order.items)) {
+      if (order.paymentStatus === 'pending') {
+        await StockService.releaseReservation(inventoryId, quantity, order._id, session);
+      } else if (['completed', 'cod_pending'].includes(order.paymentStatus)) {
+        await StockService.rollbackSale(inventoryId, quantity, 'online', 'Order Cancelled', req.user._id, session);
       }
     }
 
     order.orderStatus = 'cancelled';
     order.cancelReason = req.body.reason || 'Cancelled by customer';
     order.statusHistory.push({ status: 'cancelled', updatedAt: new Date() });
-    await order.save();
+    await order.save(session ? { session } : {});
+    await tx.commitTransaction();
+    await tx.endSession();
 
     const settings = await Settings.findOne() || {};
     const orderNotif = settings.notifications?.orderNotifications || { enabled: true, method: 'both' };
@@ -412,7 +485,11 @@ exports.cancelOrder = async (req, res, next) => {
     }
 
     return ApiResponse.success(res, null, 'Order cancelled successfully');
-  } catch (error) { next(error); }
+  } catch (error) {
+    await tx.abortTransaction();
+    await tx.endSession();
+    next(error);
+  }
 };
 
 // GET /orders/my-orders (User)
@@ -567,10 +644,22 @@ exports.requestReturn = async (req, res, next) => {
 
 // PUT /orders/:id/return-status (Admin)
 exports.updateReturnStatus = async (req, res, next) => {
+  const tx = await startTransactionSession();
+  const session = tx.session;
   try {
     const { status, adminNote, refundAmount } = req.body;
-    const order = await Order.findById(req.params.id);
-    if (!order || !order.returnRequest?.isRequested) return ApiResponse.error(res, 'Return request not found', 404);
+    if (!['pending', 'approved', 'rejected'].includes(status)) {
+      return abortAndRespond(tx, () => ApiResponse.error(res, 'Invalid return status', 400));
+    }
+    const orderQuery = Order.findById(req.params.id);
+    if (session) orderQuery.session(session);
+    const order = await orderQuery;
+    if (!order || !order.returnRequest?.isRequested) {
+      return abortAndRespond(tx, () => ApiResponse.error(res, 'Return request not found', 404));
+    }
+    if (order.returnRequest.status === 'approved') {
+      return abortAndRespond(tx, () => ApiResponse.error(res, 'This return has already been approved', 409));
+    }
 
     order.returnRequest.status = status;
     order.returnRequest.adminNote = adminNote;
@@ -581,28 +670,42 @@ exports.updateReturnStatus = async (req, res, next) => {
       order.returnRequest.refundedAt = new Date();
       order.paymentStatus = 'refunded';
 
-      // Return stock to Inventory
-      for (const item of order.items) {
-        const selections = item.isCombo ? item.comboSelections : [{ inventoryId: item.inventoryId, variant: item.variant }];
-        
-        for (const target of selections) {
-          // Only increment 'returned' count. 
-          // onlineSold remains as historical data, but 'returned' increases overall available pool.
-          await Inventory.findByIdAndUpdate(target.inventoryId, { $inc: { returned: item.quantity, availableStock: item.quantity } });
-          await StockMovement.create({
-            productId: item.productId, inventoryId: target.inventoryId,
-            variant: target.variant || item.variant, type: 'return_customer', quantity: item.quantity,
-            reason: adminNote || 'Customer Return Approved', orderId: order._id,
-          });
+      for (const [inventoryId, quantity] of getInventoryQuantities(order.items)) {
+        const inventory = await Inventory.findByIdAndUpdate(
+          inventoryId,
+          { $inc: { returned: quantity, availableStock: quantity } },
+          { session, new: true }
+        );
+        if (!inventory) throw new Error(`Inventory ${inventoryId} was not found during return approval`);
+        await StockMovement.create([{
+          productId: inventory.productRef,
+          inventoryId: inventory._id,
+          variant: { size: inventory.size, color: inventory.color },
+          type: 'return_customer',
+          quantity,
+          reason: adminNote || 'Customer Return Approved',
+          orderId: order._id,
+          referenceId: order._id,
+          referenceModel: 'Order'
+        }], session ? { session } : {});
+        if (inventory.productRef) {
+          const SyncService = require('../services/sync.service');
+          await SyncService.syncProductStock(inventory.productRef, session);
         }
       }
     }
 
-    await order.save();
+    await order.save(session ? { session } : {});
+    await tx.commitTransaction();
+    await tx.endSession();
     logAudit({ req, action: 'UPDATE_RETURN_STATUS', module: 'ORDERS', resourceId: order._id, details: { status, orderNumber: order.orderNumber } });
 
     return ApiResponse.success(res, order, `Return ${status}`);
-  } catch (error) { next(error); }
+  } catch (error) {
+    await tx.abortTransaction();
+    await tx.endSession();
+    next(error);
+  }
 };
 
 exports.handlePaymentFailed = async (req, res, next) => {
@@ -630,4 +733,3 @@ exports.handlePaymentFailed = async (req, res, next) => {
     next(error);
   }
 };
-
