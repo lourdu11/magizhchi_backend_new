@@ -18,7 +18,10 @@ exports.createReview = async (req, res, next) => {
 
     const isVerifiedPurchase = !!order;
 
-    // ATOMIC UPSERT: Find and Update or Create in one unbreakable step
+    // ATOMIC UPSERT: Find old review first to check for orphaned images
+    const oldReview = await Review.findOne({ productId, userId: req.user._id });
+    const oldImages = new Set(oldReview ? (oldReview.images || []) : []);
+    
     const review = await Review.findOneAndUpdate(
       { productId, userId: req.user._id },
       {
@@ -31,6 +34,15 @@ exports.createReview = async (req, res, next) => {
       },
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
     );
+
+    // Cleanup orphaned Cloudinary images
+    const newImages = new Set(review.images || []);
+    const orphanedImages = [...oldImages].filter(url => !newImages.has(url) && url.includes('res.cloudinary.com'));
+    
+    if (orphanedImages.length > 0) {
+      const { deleteMultipleCloudinaryAssets } = require('../utils/cloudinaryHelper');
+      deleteMultipleCloudinaryAssets(orphanedImages).catch(err => console.error('[Review Orphaned Images Cleanup Failed]', err));
+    }
 
     // TRIGGER RECALCULATION: Refresh product stats
     const stats = await Review.aggregate([
@@ -216,7 +228,14 @@ exports.deleteReview = async (req, res, next) => {
     if (!review) return ApiResponse.notFound(res, 'Review not found');
 
     const productId = review.productId;
+    const imagesToClean = (review.images || []).filter(url => url.includes('res.cloudinary.com'));
+
     await Review.findByIdAndDelete(req.params.id);
+
+    if (imagesToClean.length > 0) {
+      const { deleteMultipleCloudinaryAssets } = require('../utils/cloudinaryHelper');
+      deleteMultipleCloudinaryAssets(imagesToClean).catch(err => console.error('[Review Delete Images Cleanup Failed]', err));
+    }
 
     // RECALCULATE PRODUCT STATS
     const stats = await Review.aggregate([

@@ -1186,3 +1186,18 @@ exports.getSyncIntegrityStats = async (req, res, next) => {
     return ApiResponse.success(res, integrityReport);
   } catch (error) { next(error); }
 };
+
+exports.deleteCloudinaryMedia = async (req, res, next) => {
+  try {
+    const { url } = req.body;
+    if (!url) return ApiResponse.error(res, 'URL is required', 400);
+    
+    const { deleteCloudinaryAsset } = require('../utils/cloudinaryHelper');
+    const result = await deleteCloudinaryAsset(url);
+    if (result) {
+      return ApiResponse.success(res, { deleted: true }, 'Media permanently deleted from Cloudinary');
+    } else {
+      return ApiResponse.success(res, { deleted: false }, 'Media could not be deleted or already removed');
+    }
+  } catch (error) { next(error); }
+};

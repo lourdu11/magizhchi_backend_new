@@ -32,9 +32,16 @@ exports.deleteBanner = async (req, res, next) => {
     const banner = await Banner.findByIdAndDelete(req.params.id);
     if (!banner) return ApiResponse.notFound(res, 'Banner not found');
     
-    // Delete image from disk
+    // Delete image from Cloudinary or local disk
     if (banner.imageUrl) {
-      deleteFile(banner.imageUrl);
+      if (banner.imageUrl.includes('res.cloudinary.com')) {
+        const { deleteCloudinaryAsset } = require('../utils/cloudinaryHelper');
+        deleteCloudinaryAsset(banner.imageUrl).catch(err => 
+           console.error('Failed to delete banner from Cloudinary:', err)
+        );
+      } else {
+        deleteFile(banner.imageUrl);
+      }
     }
 
     return ApiResponse.success(res, null, 'Banner deleted');
@@ -44,8 +51,17 @@ exports.deleteBanner = async (req, res, next) => {
 // Admin: Update banner
 exports.updateBanner = async (req, res, next) => {
   try {
+    const oldBanner = await Banner.findById(req.params.id);
+    if (!oldBanner) return ApiResponse.notFound(res, 'Banner not found');
+
     const banner = await Banner.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    if (!banner) return ApiResponse.notFound(res, 'Banner not found');
+    
+    // Cleanup orphaned Cloudinary image if it was replaced
+    if (oldBanner.imageUrl && oldBanner.imageUrl !== banner.imageUrl && oldBanner.imageUrl.includes('res.cloudinary.com')) {
+      const { deleteCloudinaryAsset } = require('../utils/cloudinaryHelper');
+      deleteCloudinaryAsset(oldBanner.imageUrl).catch(err => console.error('[Banner Orphaned Image Cleanup Failed]', err));
+    }
+
     return ApiResponse.success(res, banner, 'Banner updated');
   } catch (error) { next(error); }
 };

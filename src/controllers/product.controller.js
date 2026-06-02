@@ -533,13 +533,41 @@ exports.updateProduct = async (req, res, next) => {
       return ApiResponse.notFound(res, 'Product not found');
     }
 
+    // Capture old images for cleanup
+    const oldImages = new Set([
+      product.thumbnail,
+      ...(product.images || []),
+      product.laptopImage,
+      product.tabletImage,
+      product.mobileImage,
+      ...(product.variants || []).flatMap(v => v.images || [])
+    ].filter(Boolean));
+
     Object.assign(product, updateData);
     await (session ? product.save({ session }) : product.save());
     
     // Cascade changes to Inventory
     await SyncService.syncProfileToInventory(id, updateData, session);
 
+    // Capture new images to find orphans
+    const newImages = new Set([
+      product.thumbnail,
+      ...(product.images || []),
+      product.laptopImage,
+      product.tabletImage,
+      product.mobileImage,
+      ...(product.variants || []).flatMap(v => v.images || [])
+    ].filter(Boolean));
+
+    const orphanedImages = [...oldImages].filter(url => !newImages.has(url) && url.includes('res.cloudinary.com'));
+    
     await tx.commitTransaction();
+
+    // Fire-and-forget cleanup of orphaned images
+    if (orphanedImages.length > 0) {
+      const { deleteMultipleCloudinaryAssets } = require('../utils/cloudinaryHelper');
+      deleteMultipleCloudinaryAssets(orphanedImages).catch(err => console.error('[Cleanup Orphaned Images Failed]', err));
+    }
 
     try {
       const { getIO } = require('../utils/socket');

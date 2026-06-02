@@ -26,6 +26,9 @@ r.get('/products', isStaff, productController.getAdminProducts);
 r.post('/products/:id/restore', isAdmin, productController.restoreProduct);
 r.post('/inventory/audit', isAdmin, c.runInventoryAudit);
 
+// ── Media Management ──
+r.delete('/media', isAdmin, c.deleteCloudinaryMedia);
+
 // ─── Procurement & Supply Chain (VIP) ───────────────────────
 const purchaseController = require('../controllers/purchase.controller');
 

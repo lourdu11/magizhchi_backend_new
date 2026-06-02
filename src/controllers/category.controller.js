@@ -76,7 +76,17 @@ exports.updateCategory = async (req, res, next) => {
     const oldCategory = await Category.findById(req.params.id);
     if (!oldCategory) return ApiResponse.notFound(res, 'Category not found');
 
+    const oldImages = new Set([oldCategory.image, oldCategory.tabletImage, oldCategory.mobileImage, oldCategory.sizeChart].filter(Boolean));
+
     const category = await Category.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    
+    const newImages = new Set([category.image, category.tabletImage, category.mobileImage, category.sizeChart].filter(Boolean));
+    const orphanedImages = [...oldImages].filter(url => !newImages.has(url) && url.includes('res.cloudinary.com'));
+
+    if (orphanedImages.length > 0) {
+      const { deleteMultipleCloudinaryAssets } = require('../utils/cloudinaryHelper');
+      deleteMultipleCloudinaryAssets(orphanedImages).catch(err => console.error('[Category Orphaned Images Cleanup Failed]', err));
+    }
     
     // If name changed, sync with denormalized fields in other collections
     if (req.body.name && req.body.name !== oldCategory.name) {
@@ -127,7 +137,18 @@ exports.deleteCategory = async (req, res, next) => {
       { $set: { 'items.$.category': 'Uncategorized' } }
     );
     
-    // 3. Hard delete for taxonomy
+    // 3. Cloudinary cleanup for Category Images
+    const imageUrls = [category.image, category.tabletImage, category.mobileImage, category.sizeChart].filter(Boolean);
+    if (imageUrls.length > 0) {
+      const { deleteCloudinaryAsset } = require('../utils/cloudinaryHelper');
+      imageUrls.forEach(url => {
+        if (url.includes('res.cloudinary.com')) {
+          deleteCloudinaryAsset(url).catch(err => logger.error(`[Category Cloudinary Cleanup] ${err.message}`));
+        }
+      });
+    }
+
+    // 4. Hard delete for taxonomy
     await Category.findByIdAndDelete(req.params.id);
     
     // 🚀 LOGICAL REFLAT: Clear category caches
