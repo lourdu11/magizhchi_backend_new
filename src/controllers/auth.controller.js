@@ -21,10 +21,14 @@ const setCookies = (res, accessToken, refreshToken) => {
     httpOnly: true,
     secure: isProduction,
     sameSite: isProduction ? 'none' : 'lax',
+    // Required for cross-site cookies in modern browsers (Chrome 130+, Firefox)
+    // Frontend (Vercel) and backend (Render) are on different domains
+    ...(isProduction && { partitioned: true }),
   };
   res.cookie('token', accessToken, { ...opts, maxAge: 24 * 60 * 60 * 1000 });
   res.cookie('refreshToken', refreshToken, { ...opts, maxAge: 7 * 24 * 60 * 60 * 1000 });
 };
+
 
 const { normalizePhone } = require('../utils/normalize');
 
@@ -310,6 +314,7 @@ exports.logout = async (req, res, next) => {
       httpOnly: true,
       secure: isProduction,
       sameSite: isProduction ? 'none' : 'lax',
+      ...(isProduction && { partitioned: true }),
     };
     res.clearCookie('token', opts);
     res.clearCookie('refreshToken', opts);
