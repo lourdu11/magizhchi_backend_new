@@ -42,6 +42,9 @@ class SyncService {
     const imageUrls = [];
     if (product.thumbnail) imageUrls.push(product.thumbnail);
     if (product.images && product.images.length > 0) imageUrls.push(...product.images);
+    if (product.laptopImage) imageUrls.push(product.laptopImage);
+    if (product.tabletImage) imageUrls.push(product.tabletImage);
+    if (product.mobileImage) imageUrls.push(product.mobileImage);
     if (product.variants && product.variants.length > 0) {
       product.variants.forEach(v => {
         if (v.images && v.images.length > 0) imageUrls.push(...v.images);

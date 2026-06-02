@@ -32,16 +32,19 @@ exports.deleteBanner = async (req, res, next) => {
     const banner = await Banner.findByIdAndDelete(req.params.id);
     if (!banner) return ApiResponse.notFound(res, 'Banner not found');
     
-    // Delete image from Cloudinary or local disk
-    if (banner.imageUrl) {
-      if (banner.imageUrl.includes('res.cloudinary.com')) {
-        const { deleteCloudinaryAsset } = require('../utils/cloudinaryHelper');
-        deleteCloudinaryAsset(banner.imageUrl).catch(err => 
-           console.error('Failed to delete banner from Cloudinary:', err)
-        );
-      } else {
-        deleteFile(banner.imageUrl);
-      }
+    // Delete images from Cloudinary or local disk
+    const imagesToClean = [banner.desktopImage, banner.mobileImage].filter(Boolean);
+    if (imagesToClean.length > 0) {
+      const { deleteCloudinaryAsset } = require('../utils/cloudinaryHelper');
+      imagesToClean.forEach(url => {
+        if (url.includes('res.cloudinary.com')) {
+          deleteCloudinaryAsset(url).catch(err => 
+             console.error('Failed to delete banner image from Cloudinary:', err)
+          );
+        } else {
+          deleteFile(url);
+        }
+      });
     }
 
     return ApiResponse.success(res, null, 'Banner deleted');
@@ -56,10 +59,16 @@ exports.updateBanner = async (req, res, next) => {
 
     const banner = await Banner.findByIdAndUpdate(req.params.id, req.body, { new: true });
     
-    // Cleanup orphaned Cloudinary image if it was replaced
-    if (oldBanner.imageUrl && oldBanner.imageUrl !== banner.imageUrl && oldBanner.imageUrl.includes('res.cloudinary.com')) {
-      const { deleteCloudinaryAsset } = require('../utils/cloudinaryHelper');
-      deleteCloudinaryAsset(oldBanner.imageUrl).catch(err => console.error('[Banner Orphaned Image Cleanup Failed]', err));
+    // Cleanup orphaned Cloudinary images if they were replaced
+    const oldImages = [oldBanner.desktopImage, oldBanner.mobileImage].filter(Boolean);
+    const newImages = new Set([banner.desktopImage, banner.mobileImage].filter(Boolean));
+    const orphanedImages = oldImages.filter(url => !newImages.has(url) && url.includes('res.cloudinary.com'));
+
+    if (orphanedImages.length > 0) {
+      const { deleteMultipleCloudinaryAssets } = require('../utils/cloudinaryHelper');
+      deleteMultipleCloudinaryAssets(orphanedImages).catch(err => 
+        console.error('[Banner Orphaned Image Cleanup Failed]', err)
+      );
     }
 
     return ApiResponse.success(res, banner, 'Banner updated');
