@@ -64,8 +64,8 @@ exports.trackOrder = async (req, res, next) => {
   try {
     const { orderNumber, phone } = req.body;
 
-    if (!orderNumber || !phone) {
-      return ApiResponse.error(res, 'Order number and phone number are required', 400);
+    if (!orderNumber && !phone) {
+      return ApiResponse.error(res, 'Please provide either an Order number or a Phone number', 400);
     }
 
     let query = {};
