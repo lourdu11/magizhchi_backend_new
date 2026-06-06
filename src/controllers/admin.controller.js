@@ -424,7 +424,7 @@ exports.getSalesAnalytics = async (req, res, next) => {
     // BUG #1 FIX: Properly destructure all 3 Promise.all results
     // Previously only 2 were destructured, the 3rd (topProducts) was silently dropped
     // causing a duplicate aggregation query and wrong variable assignment
-    const [staffPerformance, recentActivity, topProductsVisual] = await Promise.all([
+    const [staffPerformance, recentActivity, topProductsVisual, channelSplitRes, profitRes, customerRes] = await Promise.all([
       // 1. Staff Leaderboard (From Bills)
       Bill.aggregate([
         { $match: { ...match, status: { $ne: 'voided' } } },
@@ -461,6 +461,49 @@ exports.getSalesAnalytics = async (req, res, next) => {
         { $project: { name: 1, qty: 1, rev: 1, image: { $arrayElemAt: ['$p.images', 0] } } },
         { $sort: { qty: -1 } },
         { $limit: 8 }
+      ]),
+      // 4. Online vs Offline Split
+      Promise.all([
+        Order.aggregate([
+          { $match: orderMatch },
+          { $group: { _id: 'ONLINE', revenue: { $sum: '$pricing.totalAmount' }, count: { $sum: 1 } } }
+        ]),
+        Bill.aggregate([
+          { $match: { ...match, status: { $ne: 'voided' } } },
+          { $group: { _id: 'OFFLINE', revenue: { $sum: '$pricing.totalAmount' }, count: { $sum: 1 } } }
+        ])
+      ]),
+      // 5. Profit Metrics
+      Promise.all([
+        Order.aggregate([
+          { $match: orderMatch },
+          { $unwind: '$items' },
+          { $group: {
+              _id: null,
+              revenue: { $sum: '$items.total' },
+              cost: { $sum: { $multiply: [{ $ifNull: ['$items.purchasePrice', 0] }, '$items.quantity'] } }
+          }}
+        ]),
+        Bill.aggregate([
+          { $match: { ...match, status: { $ne: 'voided' } } },
+          { $unwind: '$items' },
+          { $group: {
+              _id: null,
+              revenue: { $sum: '$items.total' },
+              cost: { $sum: { $multiply: [{ $ifNull: ['$items.purchasePrice', 0] }, '$items.quantity'] } }
+          }}
+        ])
+      ]),
+      // 6. Customer Insights (Repeat vs New in period)
+      Promise.all([
+        Order.aggregate([
+          { $match: orderMatch },
+          { $group: { _id: { $ifNull: ['$userId', '$shippingAddress.phone'] }, ordersInPeriod: { $sum: 1 } } }
+        ]),
+        Bill.aggregate([
+          { $match: { ...match, status: { $ne: 'voided' } } },
+          { $group: { _id: '$customerDetails.phone', billsInPeriod: { $sum: 1 } } }
+        ])
       ])
     ]);
     // NOTE: topProducts, staffPerformance, recentActivity now correctly assigned — no duplicate query
@@ -479,6 +522,19 @@ exports.getSalesAnalytics = async (req, res, next) => {
       staffPerformance,
       recentActivity: recentActivity,
       topProducts: topProductsVisual,
+      channelSplit: {
+        online: { revenue: channelSplitRes[0][0]?.revenue || 0, orders: channelSplitRes[0][0]?.count || 0 },
+        offline: { revenue: channelSplitRes[1][0]?.revenue || 0, orders: channelSplitRes[1][0]?.count || 0 }
+      },
+      profit: {
+        totalRevenue: (profitRes[0][0]?.revenue || 0) + (profitRes[1][0]?.revenue || 0),
+        totalCost: (profitRes[0][0]?.cost || 0) + (profitRes[1][0]?.cost || 0),
+        grossProfit: ((profitRes[0][0]?.revenue || 0) + (profitRes[1][0]?.revenue || 0)) - ((profitRes[0][0]?.cost || 0) + (profitRes[1][0]?.cost || 0))
+      },
+      customers: {
+        totalUniqueInPeriod: customerRes[0].length + customerRes[1].length,
+        repeatCustomers: customerRes[0].filter(c => c.ordersInPeriod > 1).length + customerRes[1].filter(c => c.billsInPeriod > 1).length
+      },
       erp: {
         deadStock: results[5],
         lowMarginItems: results[6],
