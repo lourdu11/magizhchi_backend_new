@@ -733,3 +733,47 @@ exports.handlePaymentFailed = async (req, res, next) => {
     next(error);
   }
 };
+
+exports.retryPayment = async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+    const order = await Order.findById(orderId);
+    
+    if (!order) {
+      return ApiResponse.notFound(res, 'Order not found');
+    }
+    
+    if (order.paymentStatus !== 'pending') {
+      return ApiResponse.error(res, `Order payment is already ${order.paymentStatus}`, 400);
+    }
+    
+    if (order.orderStatus === 'cancelled') {
+      return ApiResponse.error(res, 'Order is cancelled and cannot be retried', 400);
+    }
+
+    if (order.paymentMethod !== 'razorpay') {
+      return ApiResponse.error(res, 'Retry is only applicable for online payments', 400);
+    }
+
+    if (!isRazorpayConfigured) {
+      return ApiResponse.error(res, 'Payment gateway is not configured', 503);
+    }
+
+    // Generate a new Razorpay Order for the same amount
+    const options = {
+      amount: Math.round(order.totalAmount * 100), // in paise
+      currency: 'INR',
+      receipt: `retry_${order.orderNumber}`
+    };
+
+    const razorpayOrder = await razorpay.orders.create(options);
+
+    return ApiResponse.success(res, {
+      order,
+      razorpayOrder
+    }, 'Payment retry initialized successfully');
+  } catch (error) {
+    logger.error('Payment retry error:', error);
+    next(error);
+  }
+};
