@@ -281,7 +281,7 @@ const initWhatsApp = async () => {
     return sock;
 };
 
-const sendMessage = async (phone, message, options = {}, retries = 3) => {
+const sendMessage = async (phone, message, options = {}, retries = 2) => {
     const cleanPhone = phone.replace(/\D/g, '');
     const withCountry = cleanPhone.startsWith('91') ? cleanPhone : `91${cleanPhone}`;
     const jid = `${withCountry}@s.whatsapp.net`;
@@ -293,13 +293,13 @@ const sendMessage = async (phone, message, options = {}, retries = 3) => {
                 // If already initializing, don't trigger again, just wait
                 if (!isInitializing) await initWhatsApp();
                 
-                // Wait for connection to be ready (increased poll: 30s)
+                // Wait up to 8s for connection — fail fast so email fallback can fire
                 logger.info(`⏳ WhatsApp: Waiting for connection (Attempt ${i + 1})...`);
-                for (let j = 0; j < 30; j++) {
+                for (let j = 0; j < 8; j++) {
                     if (isReady) break;
                     await new Promise(r => setTimeout(r, 1000));
                 }
-                if (!isReady) throw new Error('WhatsApp socket not ready after 30s');
+                if (!isReady) throw new Error('WhatsApp socket not ready after 8s');
             }
 
             let result;
@@ -316,7 +316,7 @@ const sendMessage = async (phone, message, options = {}, retries = 3) => {
         } catch (err) {
             logger.warn(`⚠️ WhatsApp Send Attempt ${i + 1} failed: ${err.message}`);
             if (i === retries - 1) throw err;
-            await new Promise(r => setTimeout(r, 3000)); // Increase wait between retries
+            await new Promise(r => setTimeout(r, 2000)); // Wait 2s between retries
         }
     }
 };
