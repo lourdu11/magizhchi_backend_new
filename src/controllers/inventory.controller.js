@@ -514,6 +514,8 @@ exports.createInventoryItem = async (req, res, next) => {
         const StockMovement = require('../models/StockMovement');
         await StockMovement.create({
           inventoryId: exists._id,
+          productId: exists.productRef,
+          variant: { size: exists.size, color: exists.color },
           type: stockToInit > 0 ? 'purchase' : 'correction_remove',
           quantity: Math.abs(stockToInit),
           reason: 'Manual Stock Update (Quick Entry)',
@@ -597,6 +599,8 @@ exports.createInventoryItem = async (req, res, next) => {
     if (stockToInit > 0) {
       await StockMovement.create({
         inventoryId: newItem._id,
+        productId: newItem.productRef,
+        variant: { size: newItem.size, color: newItem.color },
         type: 'purchase',
         quantity: stockToInit,
         reason: 'Manual Inventory Initialization',
