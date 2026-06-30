@@ -736,7 +736,7 @@ exports.handlePaymentFailed = async (req, res, next) => {
 
 exports.retryPayment = async (req, res, next) => {
   try {
-    const { orderId } = req.params;
+    const { id: orderId } = req.params;
     const order = await Order.findById(orderId);
     
     if (!order) {
