@@ -516,7 +516,7 @@ exports.createInventoryItem = async (req, res, next) => {
           inventoryId: exists._id,
           productId: exists.productRef,
           variant: { size: exists.size, color: exists.color },
-          type: stockToInit > 0 ? 'purchase' : 'correction_remove',
+          type: stockToInit > 0 ? 'adjustment_in' : 'adjustment_out',
           quantity: Math.abs(stockToInit),
           reason: 'Manual Stock Update (Quick Entry)',
           performedBy: req.user?._id
