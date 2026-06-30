@@ -573,7 +573,7 @@ exports.createInventoryItem = async (req, res, next) => {
     const finalSellingPrice = Number(sellingPrice) || parentProduct?.sellingPrice || Number(purchasePrice) * 1.5 || 0;
     const images = (parentProduct?.images?.length > 0) ? [parentProduct.images[0]] : [];
 
-    const stockToInit = Number(req.body.totalStock) || 0;
+
 
     const newItem = await Inventory.create({
       productName: productName.trim(),
