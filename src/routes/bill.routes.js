@@ -5,6 +5,7 @@ const { protect, isAdmin, isStaff, canViewBills, canAdminister } = require('../m
 
 r.post('/create', protect, isStaff, c.createBill);
 r.get('/', protect, canViewBills, c.getBills); 
+r.get('/analytics', protect, canViewBills, c.getBillsAnalytics);
 r.get('/daily-report', protect, canAdminister, c.getDailyReport); 
 r.get('/staff-stats', protect, isStaff, c.getStaffDailyStats);
 r.get('/customer/:phone', protect, isStaff, c.lookupCustomer);

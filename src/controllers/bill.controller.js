@@ -1056,3 +1056,125 @@ exports.getStaffDailyStats = async (req, res, next) => {
     });
   } catch (error) { next(error); }
 };
+
+// ── GET /bills/analytics ──────────────────────────────────────────────────────
+// Returns KPI summary, daily revenue chart, top products, payment split, staff leaderboard
+exports.getBillsAnalytics = async (req, res, next) => {
+  try {
+    const { from, to } = req.query;
+
+    // Default: current month
+    const now = new Date();
+    const start = from ? new Date(from) : new Date(now.getFullYear(), now.getMonth(), 1);
+    const end   = to   ? new Date(to)   : new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    start.setHours(0, 0, 0, 0);
+
+    // Staff can only see their own bills; admin sees all
+    const baseMatch = {
+      createdAt: { $gte: start, $lte: end },
+      status: { $ne: 'voided' },
+    };
+    if (req.user.role === 'staff') baseMatch.staffId = req.user._id;
+
+    const [summary, dailyRevenue, topProducts, paymentSplit, staffLeaderboard] = await Promise.all([
+
+      // ── 1. KPI Summary ──────────────────────────────────────────────────────
+      Bill.aggregate([
+        { $match: baseMatch },
+        { $group: {
+          _id: null,
+          totalRevenue:    { $sum: '$pricing.totalAmount' },
+          totalBills:      { $sum: 1 },
+          cashTotal:       { $sum: { $ifNull: ['$paymentDetails.cashAmount', 0] } },
+          upiTotal:        { $sum: { $ifNull: ['$paymentDetails.upiAmount', 0] } },
+          cardTotal:       { $sum: { $ifNull: ['$paymentDetails.cardAmount', 0] } },
+          totalItems:      { $sum: { $sum: '$items.quantity' } },
+          totalDiscount:   { $sum: { $ifNull: ['$pricing.discountAmount', 0] } },
+        }}
+      ]),
+
+      // ── 2. Daily Revenue (last 30 days bar chart) ───────────────────────────
+      Bill.aggregate([
+        { $match: baseMatch },
+        { $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'Asia/Kolkata' } },
+          revenue: { $sum: '$pricing.totalAmount' },
+          bills:   { $sum: 1 },
+        }},
+        { $sort: { _id: 1 } }
+      ]),
+
+      // ── 3. Top Products Sold ────────────────────────────────────────────────
+      Bill.aggregate([
+        { $match: baseMatch },
+        { $unwind: '$items' },
+        { $group: {
+          _id: { $ifNull: ['$items.productName', 'Unknown'] },
+          qty:        { $sum: '$items.quantity' },
+          revenue:    { $sum: { $multiply: ['$items.unitPrice', '$items.quantity'] } },
+          productId:  { $first: '$items.productId' },
+        }},
+        { $sort: { qty: -1 } },
+        { $limit: 10 },
+        { $project: { name: '$_id', qty: 1, revenue: 1, productId: 1, _id: 0 } }
+      ]),
+
+      // ── 4. Payment Method Split ─────────────────────────────────────────────
+      Bill.aggregate([
+        { $match: baseMatch },
+        { $group: {
+          _id: '$paymentMethod',
+          amount: { $sum: '$pricing.totalAmount' },
+          count:  { $sum: 1 },
+        }},
+        { $sort: { amount: -1 } }
+      ]),
+
+      // ── 5. Staff Leaderboard ────────────────────────────────────────────────
+      Bill.aggregate([
+        { $match: baseMatch },
+        { $group: {
+          _id: '$staffId',
+          revenue: { $sum: '$pricing.totalAmount' },
+          bills:   { $sum: 1 },
+        }},
+        { $sort: { revenue: -1 } },
+        { $limit: 10 },
+        { $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'staff'
+        }},
+        { $unwind: { path: '$staff', preserveNullAndEmpty: true } },
+        { $project: {
+          name:    { $ifNull: ['$staff.name', 'Unknown Staff'] },
+          revenue: 1,
+          bills:   1,
+          _id:     0
+        }}
+      ]),
+
+    ]);
+
+    const s = summary[0] || {};
+    return ApiResponse.success(res, {
+      summary: {
+        totalBills:    s.totalBills    || 0,
+        totalRevenue:  s.totalRevenue  || 0,    // in paise
+        avgBillValue:  s.totalBills ? Math.round((s.totalRevenue || 0) / s.totalBills) : 0,
+        cashTotal:     s.cashTotal     || 0,
+        upiTotal:      s.upiTotal      || 0,
+        cardTotal:     s.cardTotal     || 0,
+        totalItems:    s.totalItems    || 0,
+        totalDiscount: s.totalDiscount || 0,
+      },
+      dailyRevenue,
+      topProducts,
+      paymentSplit,
+      staffLeaderboard,
+      range: { from: start, to: end },
+    });
+  } catch (error) { next(error); }
+};
+
