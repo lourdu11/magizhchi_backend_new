@@ -1066,8 +1066,11 @@ exports.getBillsAnalytics = async (req, res, next) => {
     // Default: current month
     const now = new Date();
     const start = from ? new Date(from) : new Date(now.getFullYear(), now.getMonth(), 1);
-    const end   = to   ? new Date(to)   : new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    const end   = to   ? new Date(to)   : new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    
+    // Ensure full day coverage
     start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
 
     // Staff can only see their own bills; admin sees all
     const baseMatch = {
