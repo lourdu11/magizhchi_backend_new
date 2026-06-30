@@ -69,19 +69,52 @@ const sendOTP = async (rawIdentifier, purpose = 'register') => {
     }
   }
 
-  // ── Phone → Your WhatsApp ──────────────────────────────────
+  // ── Phone → Try WhatsApp first, fallback to email ──────────
   if (isPhoneId) {
+    // Try WhatsApp first
     try {
       await sendWhatsAppOTP_Own(identifier, otp, purpose);
       return { method: 'whatsapp', message: `OTP Sent! Check WhatsApp ${maskPhone(identifier)}.` };
-    } catch (err) {
-      logger.error(`❌ WHATSAPP OTP SEND ERROR to ${identifier}:`, err.message);
+    } catch (whatsappErr) {
+      logger.error(`❌ WHATSAPP OTP SEND ERROR to ${identifier}:`, whatsappErr.message);
+      logger.warn(`⚠️  WhatsApp failed — attempting email fallback for ${identifier}`);
+
+      // ── Email fallback: look up the user's email from DB ──
+      try {
+        const User = require('../models/User');
+        const user = await User.findOne({ phone: identifier }).select('email');
+        if (user?.email) {
+          // Re-save OTP under email identifier so verifyOTP finds it
+          await OTP.findOneAndDelete({ identifier: user.email, purpose });
+          await OTP.create({
+            identifier: user.email,
+            purpose,
+            otp,
+            expiresAt: new Date(Date.now() + expireMinutes * 60 * 1000),
+          });
+          
+          await sendEmailOTP(user.email, otp, purpose);
+          logger.info(`✅ Email fallback OTP sent to: ${user.email} (for phone ${identifier})`);
+          return {
+            method: 'email',
+            message: `OTP Sent! Check your ${maskEmail(user.email)} (WhatsApp unavailable).`,
+          };
+        }
+      } catch (emailErr) {
+        logger.error(`❌ EMAIL FALLBACK ALSO FAILED for ${identifier}:`, emailErr.message);
+      }
+
+      // Dev: return console fallback instead of crashing
       if (isDev) {
         return { 
           method: 'dev_console', 
-          message: `OTP logged in terminal (WhatsApp failed: ${err.message}). Check if QR is scanned.` 
+          message: `OTP logged in terminal (WhatsApp failed: ${whatsappErr.message}). Check if QR is scanned.` 
         };
       }
+
+      // Production: throw descriptive error so admin knows WhatsApp is down
+      const err = new Error('OTP delivery failed: WhatsApp is disconnected and no email is linked to this account. Please contact support or use your email to log in.');
+      err.statusCode = 503;
       throw err;
     }
   }
@@ -93,7 +126,23 @@ const sendOTP = async (rawIdentifier, purpose = 'register') => {
 // ─── Verify OTP ───────────────────────────────────────────────
 const verifyOTP = async (rawIdentifier, otp, purpose = 'register', deleteAfter = true) => {
   const identifier = rawIdentifier.includes('@') ? rawIdentifier.toLowerCase().trim() : rawIdentifier.replace(/\D/g, '');
-  const record = await OTP.findOne({ identifier, purpose });
+  
+  // Primary lookup by identifier (phone or email as stored)
+  let record = await OTP.findOne({ identifier, purpose });
+  
+  // Email fallback: if OTP was stored under user's email (WhatsApp was down), find it
+  if (!record && !rawIdentifier.includes('@')) {
+    try {
+      const User = require('../models/User');
+      const user = await User.findOne({ phone: identifier }).select('email');
+      if (user?.email) {
+        record = await OTP.findOne({ identifier: user.email, purpose });
+        if (record) {
+          return await _verifyRecord(record, otp, deleteAfter);
+        }
+      }
+    } catch (_) { /* ignore lookup errors, fall through to not-found error */ }
+  }
 
   if (!record) {
     const err = new Error('OTP not found or expired. Please request a new OTP.');
@@ -101,6 +150,11 @@ const verifyOTP = async (rawIdentifier, otp, purpose = 'register', deleteAfter =
     throw err;
   }
 
+  return await _verifyRecord(record, otp, deleteAfter);
+};
+
+// ─── Internal verify helper ───────────────────────────────────
+const _verifyRecord = async (record, otp, deleteAfter) => {
   if (record.expiresAt < new Date()) {
     await OTP.deleteOne({ _id: record._id });
     const err = new Error('OTP has expired. Please request a new one.');
@@ -127,7 +181,6 @@ const verifyOTP = async (rawIdentifier, otp, purpose = 'register', deleteAfter =
   }
   return true;
 };
-
 
 // ─── Helpers ──────────────────────────────────────────────────
 const maskEmail = (email) => {

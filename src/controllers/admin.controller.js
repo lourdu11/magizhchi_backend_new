@@ -512,7 +512,8 @@ exports.getSalesAnalytics = async (req, res, next) => {
       data: results[0], 
       categoryData: results[1], 
       paymentData: results[2], 
-      locationData: results[3],
+      regionData: results[3],
+
       summary: {
         totalRevenue: currentStats.totalRevenue,
         totalOrders: currentStats.totalOrders,
