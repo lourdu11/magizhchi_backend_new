@@ -500,7 +500,33 @@ exports.createInventoryItem = async (req, res, next) => {
       color: color.trim(), 
       size: size.trim() 
     });
-    if (exists) return ApiResponse.error(res, 'This variant (Color/Size) already exists for this product', 400);
+    
+    const stockToInit = Number(req.body.totalStock) || 0;
+
+    // UPSERT LOGIC: If variant already exists, just add stock to it!
+    if (exists) {
+      if (stockToInit !== 0) {
+        exists.totalStock += stockToInit;
+        exists.availableStock += stockToInit;
+        await exists.save();
+        
+        // Log movement
+        const StockMovement = require('../models/StockMovement');
+        await StockMovement.create({
+          inventoryId: exists._id,
+          type: stockToInit > 0 ? 'purchase' : 'correction_remove',
+          quantity: Math.abs(stockToInit),
+          reason: 'Manual Stock Update (Quick Entry)',
+          performedBy: req.user?._id
+        });
+
+        if (exists.productRef) {
+          const SyncService = require('../services/sync.service');
+          await SyncService.syncProductStock(exists.productRef);
+        }
+      }
+      return ApiResponse.success(res, exists, 'Stock successfully added to existing variant');
+    }
 
     // 2. Auto-link to Product if missing
     let finalProductRef = productRef;
