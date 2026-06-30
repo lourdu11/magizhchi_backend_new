@@ -761,7 +761,7 @@ exports.retryPayment = async (req, res, next) => {
 
     // Generate a new Razorpay Order for the same amount
     const options = {
-      amount: Math.round(order.totalAmount * 100), // in paise
+      amount: Math.round(order.pricing.totalAmount * 100), // in paise
       currency: 'INR',
       receipt: `retry_${order.orderNumber}_${Date.now()}` // Ensure unique receipt
     };
@@ -798,7 +798,7 @@ exports.abandonPayment = async (req, res, next) => {
       const customerName = order.guestDetails?.name || order.shippingAddress?.name || 'Customer';
       const customerPhone = order.guestDetails?.phone || order.shippingAddress?.phone || 'N/A';
       
-      const adminMessage = `*PAYMENT ABANDONED*\n\nOrder: #${order.orderNumber}\nCustomer: ${customerName}\nPhone: ${customerPhone}\nAmount: Rs.${order.totalAmount}\nPayment Attempts: ${retryCount + 1}\n\nThe customer closed the payment window without paying.`;
+      const adminMessage = `*PAYMENT ABANDONED*\n\nOrder: #${order.orderNumber}\nCustomer: ${customerName}\nPhone: ${customerPhone}\nAmount: Rs.${order.pricing.totalAmount}\nPayment Attempts: ${retryCount + 1}\n\nThe customer closed the payment window without paying.`;
       
       const { sendWhatsappMessage } = require('../services/whatsapp.service');
       const Settings = require('../models/Settings');
