@@ -370,7 +370,7 @@ const sendOrderNotificationToAdmin = async (order) => {
                 `👤 *Customer:* ${order.shippingAddress.name}\n` +
                 `📞 *Phone:* ${order.shippingAddress.phone}\n` +
                 `💰 *Total:* ₹${order.pricing.totalAmount.toLocaleString('en-IN')}\n` +
-                `💳 *Payment:* ${order.paymentMethod.toUpperCase()}\n\n` +
+                `💳 *Payment:* ${order.paymentMethod.toUpperCase()} (${order.paymentStatus.toUpperCase()})\n\n` +
                 `🛒 *Items:*\n${itemsSummary}\n\n` +
                 `──────────────────\n` +
                 `*Check the Admin Dashboard for details.*`;
