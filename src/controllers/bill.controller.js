@@ -1149,7 +1149,7 @@ exports.getBillsAnalytics = async (req, res, next) => {
           foreignField: '_id',
           as: 'staff'
         }},
-        { $unwind: { path: '$staff', preserveNullAndEmpty: true } },
+        { $unwind: { path: '$staff', preserveNullAndEmptyArrays: true } },
         { $project: {
           name:    { $ifNull: ['$staff.name', 'Unknown Staff'] },
           revenue: 1,
