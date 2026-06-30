@@ -53,11 +53,13 @@ exports.getDashboardStats = async (req, res, next) => {
       lowStockInventory,
       supplierStats,
       wastageStats,
-      recentOrders  // BUG #7 FIX: fetch recent orders for Transaction Pulse feed
+      recentOrders,
+      offlineRefunds,
+      onlineRefunds
     ] = await Promise.all([
       // 1. Revenue & Cost Aggregation (Optimized via Snapshots)
       Order.aggregate([
-        { $match: { orderStatus: { $nin: ['cancelled', 'returned'] } } },
+        { $match: { orderStatus: { $ne: 'cancelled' } } }, // INCLUDE returned orders in gross revenue!
         { $unwind: '$items' },
         { $group: {
             _id: null,

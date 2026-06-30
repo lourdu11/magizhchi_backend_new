@@ -1079,7 +1079,7 @@ exports.getBillsAnalytics = async (req, res, next) => {
     };
     if (req.user.role === 'staff') baseMatch.staffId = req.user._id;
 
-    const [summary, dailyRevenue, topProducts, paymentSplit, staffLeaderboard] = await Promise.all([
+    const [summary, dailyRevenue, topProducts, paymentSplit, staffLeaderboard, refundsList] = await Promise.all([
 
       // ── 1. KPI Summary ──────────────────────────────────────────────────────
       Bill.aggregate([
@@ -1158,14 +1158,33 @@ exports.getBillsAnalytics = async (req, res, next) => {
         }}
       ]),
 
+      // ── 6. Refunds ────────────────────────────────────────────────
+      require('../models/Return').aggregate([
+        { $match: { 
+            type: 'customer_return', 
+            status: { $ne: 'cancelled' },
+            date: { $gte: start, $lte: end },
+            billId: { $exists: true } // Only POS refunds
+        }},
+        { $group: {
+            _id: null,
+            totalRefunds: { $sum: '$totalAmount' }
+        }}
+      ])
+
     ]);
 
     const s = summary[0] || {};
+    const r = refundsList[0] || { totalRefunds: 0 };
+    const netRevenue = Math.max(0, (s.totalRevenue || 0) - (r.totalRefunds || 0));
+
     return ApiResponse.success(res, {
       summary: {
         totalBills:    s.totalBills    || 0,
-        totalRevenue:  s.totalRevenue  || 0,    // in paise
-        avgBillValue:  s.totalBills ? Math.round((s.totalRevenue || 0) / s.totalBills) : 0,
+        totalRevenue:  netRevenue,     // Changed to Net Revenue!
+        grossRevenue:  s.totalRevenue  || 0,
+        totalRefunds:  r.totalRefunds  || 0,
+        avgBillValue:  s.totalBills ? Math.round(netRevenue / s.totalBills) : 0,
         cashTotal:     s.cashTotal     || 0,
         upiTotal:      s.upiTotal      || 0,
         cardTotal:     s.cardTotal     || 0,
@@ -1181,3 +1200,32 @@ exports.getBillsAnalytics = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
+// ── POST /admin/bills/:id/refund ──────────────────────────────────────────────
+exports.refundBill = async (req, res, next) => {
+  try {
+    const { amount, reason, method } = req.body;
+    const bill = await Bill.findById(req.params.id);
+    if (!bill) return ApiResponse.notFound(res, 'Bill not found');
+    if (bill.status === 'voided') return ApiResponse.badRequest(res, 'Cannot refund a voided bill');
+
+    const Return = require('../models/Return');
+    
+    const existingRefunds = await Return.find({ billId: bill._id, type: 'customer_return' });
+    const refundedSoFar = existingRefunds.reduce((sum, r) => sum + (r.totalAmount || 0), 0);
+    
+    if (refundedSoFar + Number(amount) > bill.pricing.totalAmount) {
+      return ApiResponse.badRequest(res, `Total refunds (₹${refundedSoFar + Number(amount)}) cannot exceed original bill amount (₹${bill.pricing.totalAmount})`);
+    }
+
+    const refund = await Return.create({
+      type: 'customer_return',
+      billId: bill._id,
+      totalAmount: Number(amount),
+      refundMethod: method || 'cash',
+      reason: reason || 'POS Customer Refund',
+      date: new Date()
+    });
+
+    return ApiResponse.success(res, refund, 'Refund successfully recorded in the ledger');
+  } catch (error) { next(error); }
+};

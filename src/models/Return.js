@@ -4,7 +4,8 @@ const returnSchema = new mongoose.Schema({
   type: { type: String, enum: ['customer_return', 'supplier_return'], required: true },
   
   // Reference
-  orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' }, // For Customer Return
+  orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' }, // For Online Return
+  billId: { type: mongoose.Schema.Types.ObjectId, ref: 'Bill' }, // For Offline POS Return
   purchaseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Purchase' }, // For Supplier Return
   supplierId: { type: mongoose.Schema.Types.ObjectId, ref: 'Supplier' },
   

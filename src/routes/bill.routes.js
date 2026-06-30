@@ -14,6 +14,7 @@ r.get('/:id', protect, canViewBills, c.getBill);
 r.put('/:id', protect, isStaff, c.updateBill);
 r.post('/:id/resend-receipt', protect, isStaff, c.resendReceipt); // ✅ BUG 8 FIX: Was missing
 r.delete('/:id', protect, canAdminister, c.deleteBill);  // Admin only — reverses stock
+r.post('/:id/refund', protect, canAdminister, c.refundBill); // Process full or partial refund
 
 
 module.exports = r;
