@@ -763,10 +763,14 @@ exports.retryPayment = async (req, res, next) => {
     const options = {
       amount: Math.round(order.totalAmount * 100), // in paise
       currency: 'INR',
-      receipt: `retry_${order.orderNumber}`
+      receipt: `retry_${order.orderNumber}_${Date.now()}` // Ensure unique receipt
     };
 
     const razorpayOrder = await razorpay.orders.create(options);
+
+    order.paymentRetryCount = (order.paymentRetryCount || 0) + 1;
+    order.paymentDetails.razorpayOrderId = razorpayOrder.id; // Update razorpayOrderId for the retry
+    await order.save();
 
     return ApiResponse.success(res, {
       order,
@@ -774,6 +778,43 @@ exports.retryPayment = async (req, res, next) => {
     }, 'Payment retry initialized successfully');
   } catch (error) {
     logger.error('Payment retry error:', error);
+    next(error);
+  }
+};
+
+exports.abandonPayment = async (req, res, next) => {
+  try {
+    const { id: orderId } = req.params;
+    const order = await Order.findById(orderId);
+    
+    if (!order) {
+      return ApiResponse.notFound(res, 'Order not found');
+    }
+
+    if (order.paymentStatus === 'pending') {
+      logger.warn(`🛑 Payment abandoned for Order ${order.orderNumber}.`);
+      
+      const retryCount = order.paymentRetryCount || 0;
+      const customerName = order.guestDetails?.name || order.shippingAddress?.name || 'Customer';
+      const customerPhone = order.guestDetails?.phone || order.shippingAddress?.phone || 'N/A';
+      
+      const adminMessage = `*PAYMENT ABANDONED*\n\nOrder: #${order.orderNumber}\nCustomer: ${customerName}\nPhone: ${customerPhone}\nAmount: Rs.${order.totalAmount}\nPayment Attempts: ${retryCount + 1}\n\nThe customer closed the payment window without paying.`;
+      
+      const { sendWhatsappMessage } = require('../services/whatsapp.service');
+      const Settings = require('../models/Settings');
+      const settings = await Settings.findOne();
+      const adminPhones = settings?.notifications?.adminPhones || [];
+      
+      for (const phone of adminPhones) {
+        if (phone) {
+          sendWhatsappMessage(phone, adminMessage).catch(err => logger.error(`Failed to send WhatsApp to admin ${phone}`, err));
+        }
+      }
+    }
+
+    return ApiResponse.success(res, null, 'Payment abandonment logged');
+  } catch (error) {
+    logger.error('Abandon payment error:', error);
     next(error);
   }
 };

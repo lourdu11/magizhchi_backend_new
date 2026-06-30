@@ -16,5 +16,6 @@ r.put('/:id/status', protect, isAdmin, orderController.updateOrderStatus);
 r.post('/:id/resend-receipt', protect, isAdmin, orderController.resendReceipt);
 r.put('/:id/return-status', protect, isAdmin, orderController.updateReturnStatus);
 r.post('/:id/retry-payment', optionalAuth, orderController.retryPayment);
+r.post('/:id/payment-abandoned', optionalAuth, orderController.abandonPayment);
 
 module.exports = r;

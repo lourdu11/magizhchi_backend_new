@@ -83,6 +83,7 @@ const orderSchema = new mongoose.Schema(
       paidAt: Date,
       webhookCaptured: { type: Boolean, default: false },
     },
+    paymentRetryCount: { type: Number, default: 0 },
     checkoutAccessToken: { type: String, select: false },
     orderStatus: {
       type: String,
