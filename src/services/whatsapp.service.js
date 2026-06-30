@@ -221,7 +221,21 @@ const initWhatsApp = async () => {
         if (qr) {
             currentQR = qr;
             currentQRDataUrl = await QRCode.toDataURL(qr, { width: 300, margin: 1 });
-            logger.info('WhatsApp QR refreshed for authenticated admin access.');
+
+            // ── Log scannable QR URL to Render logs ──────────────────────
+            // Admin can open this URL in any browser and scan with WhatsApp
+            const encodedQR = encodeURIComponent(qr);
+            const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?data=${encodedQR}&size=300x300`;
+            logger.info('');
+            logger.info('╔══════════════════════════════════════════════════════════╗');
+            logger.info('║         📱 WHATSAPP QR CODE — SCAN TO CONNECT           ║');
+            logger.info('║                                                          ║');
+            logger.info('║  Open this URL in your browser and scan with WhatsApp:  ║');
+            logger.info(`║  ${qrImageUrl.substring(0, 56).padEnd(56)} ║`);
+            logger.info('║  (Full URL below)                                        ║');
+            logger.info('╚══════════════════════════════════════════════════════════╝');
+            logger.info(`📱 WhatsApp QR: ${qrImageUrl}`);
+            logger.info('');
         }
 
         if (connection === 'close') {
