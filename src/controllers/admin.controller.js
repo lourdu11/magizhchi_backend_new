@@ -722,7 +722,13 @@ exports.createCustomer = async (req, res, next) => {
 exports.createStaff = async (req, res, next) => {
   try {
     const { name, email, phone, password } = req.body;
-    const staff = await User.create({ name, email, phone, password, role: 'staff', isVerified: true });
+    
+    // Normalize to match auth.controller logic
+    const { normalizePhone } = require('../utils/normalize');
+    const normalizedEmail = email?.toLowerCase().trim();
+    const normalizedPhone = phone ? normalizePhone(phone) : phone;
+
+    const staff = await User.create({ name, email: normalizedEmail, phone: normalizedPhone, password, role: 'staff', isVerified: true });
     return ApiResponse.created(res, { staff: { _id: staff._id, name, email, phone, role: 'staff' } }, 'Staff account created');
   } catch (error) { next(error); }
 };
@@ -733,9 +739,11 @@ exports.updateStaff = async (req, res, next) => {
     const staff = await User.findOne({ _id: req.params.id, role: 'staff' });
     if (!staff) return ApiResponse.notFound(res, 'Staff not found');
 
+    const { normalizePhone } = require('../utils/normalize');
+
     staff.name = name || staff.name;
-    staff.email = email || staff.email;
-    staff.phone = phone || staff.phone;
+    staff.email = email ? email.toLowerCase().trim() : staff.email;
+    staff.phone = phone ? normalizePhone(phone) : staff.phone;
     if (password) staff.password = password;
 
     await staff.save();

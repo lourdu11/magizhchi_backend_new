@@ -90,8 +90,8 @@ exports.login = async (req, res, next) => {
     // Reset login attempts on success
     await User.findByIdAndUpdate(user._id, { $set: { loginAttempts: 0 }, $unset: { lockUntil: 1 } });
 
-    // ── Admin/Staff 2FA Challenge ───────────────────────────────
-    if (user.role === 'admin' || user.role === 'staff') {
+    // ── Admin 2FA Challenge ───────────────────────────────
+    if (user.role === 'admin') {
       logger.info(`🛡️ 2FA Challenge initiated for ${user.role}: ${identifier}`);
       
       const result = await sendOTP(identifier, 'admin_2fa');
