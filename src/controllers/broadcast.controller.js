@@ -126,7 +126,7 @@ exports.getBroadcastCustomers = async (req, res) => {
  */
 exports.createBroadcast = async (req, res) => {
     try {
-        const { title, message, mediaUrl, mediaType, recipients } = req.body;
+        const { title, message, mediaUrl, mediaUrls, mediaType, recipients } = req.body;
 
         if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
             return res.status(400).json({ success: false, message: 'No recipients selected' });
@@ -147,6 +147,7 @@ exports.createBroadcast = async (req, res) => {
             title,
             message,
             mediaUrl,
+            mediaUrls: Array.isArray(mediaUrls) ? mediaUrls : (mediaUrl ? [mediaUrl] : []),
             mediaType: mediaType || 'none',
             totalRecipients: uniqueRecipients.length,
             stats: { pending: uniqueRecipients.length, sent: 0, delivered: 0, failed: 0 },
@@ -181,7 +182,7 @@ exports.createBroadcast = async (req, res) => {
         }
 
         // Start processing in background
-        processBroadcast(broadcast._id, message, mediaUrl, mediaType).catch(e => logger.error('BG Broadcast Error:', e));
+        processBroadcast(broadcast._id, message, mediaUrl, mediaUrls, mediaType).catch(e => logger.error('BG Broadcast Error:', e));
 
         res.status(201).json({ success: true, broadcastId: broadcast._id, message: `Broadcast started for ${validLogs.length} recipients` });
     } catch (err) {
@@ -197,7 +198,7 @@ exports.createBroadcast = async (req, res) => {
  * Background Processor for Broadcast (FIX C2)
  * Uses a cursor to avoid memory pressure and allows for easy resumption
  */
-async function processBroadcast(broadcastId, baseMessage, mediaUrl, mediaType) {
+async function processBroadcast(broadcastId, baseMessage, mediaUrl, mediaUrls, mediaType) {
     try {
         // 1. Mark as processing if not already
         await Broadcast.findByIdAndUpdate(broadcastId, { status: 'processing' });
@@ -212,14 +213,28 @@ async function processBroadcast(broadcastId, baseMessage, mediaUrl, mediaType) {
                 if (!currentBroadcast || currentBroadcast.status !== 'processing') break;
 
                 const personalizedMessage = baseMessage.replace(/{{name}}/g, log.customerName || 'Customer');
-                const options = {};
-                if (mediaUrl && mediaType === 'image') options.image = mediaUrl;
                 
                 // WhatsApp presence check
                 const isRegistered = await whatsappService.isRegistered(log.phone);
                 if (!isRegistered) throw new Error('Number not registered on WhatsApp');
 
-                const result = await whatsappService.sendMessage(log.phone, personalizedMessage, options);
+                const urlsToUse = Array.isArray(mediaUrls) && mediaUrls.length > 0 ? mediaUrls : (mediaUrl ? [mediaUrl] : []);
+                let result;
+
+                if (urlsToUse.length > 0 && mediaType === 'image') {
+                    // Send all images except the last one WITHOUT caption
+                    for (let i = 0; i < urlsToUse.length - 1; i++) {
+                        await whatsappService.sendMessage(log.phone, '', { image: urlsToUse[i] });
+                        await new Promise(resolve => setTimeout(resolve, 800)); // small delay between images
+                    }
+                    // Send the last image WITH caption
+                    result = await whatsappService.sendMessage(log.phone, personalizedMessage, { image: urlsToUse[urlsToUse.length - 1] });
+                } else {
+                    // Text only or other media
+                    const options = {};
+                    if (mediaUrl && mediaType !== 'image') options[mediaType] = mediaUrl; // fallback
+                    result = await whatsappService.sendMessage(log.phone, personalizedMessage, options);
+                }
                 
                 log.status = 'sent';
                 log.messageId = result?.key?.id;

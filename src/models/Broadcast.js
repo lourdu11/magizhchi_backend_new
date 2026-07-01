@@ -4,7 +4,8 @@ const broadcastSchema = new mongoose.Schema(
   {
     title: { type: String, required: true, trim: true },
     message: { type: String, required: true },
-    mediaUrl: { type: String },
+    mediaUrl: { type: String }, // Legacy
+    mediaUrls: [{ type: String }],
     mediaType: { type: String, default: 'none' },
     totalRecipients: { type: Number, default: 0 },
     status: { 
