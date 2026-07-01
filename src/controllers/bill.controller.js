@@ -483,7 +483,7 @@ exports.getBills = async (req, res, next) => {
   try {
     const { lastId, limit = 20, date, search } = req.query;
     const query = {};
-    if (req.user.role === 'staff') query.staffId = req.user._id;
+    // Staff can now see all bills (Admin-like UI requirement)
     if (date) {
       const start = new Date(date); start.setHours(0, 0, 0, 0);
       const end   = new Date(date); end.setHours(23, 59, 59, 999);
@@ -1072,12 +1072,11 @@ exports.getBillsAnalytics = async (req, res, next) => {
     start.setHours(0, 0, 0, 0);
     end.setHours(23, 59, 59, 999);
 
-    // Staff can only see their own bills; admin sees all
+    // Staff can now see all bills (Admin-like UI requirement)
     const baseMatch = {
       createdAt: { $gte: start, $lte: end },
       status: { $ne: 'voided' },
     };
-    if (req.user.role === 'staff') baseMatch.staffId = req.user._id;
 
     const [summary, dailyRevenue, topProducts, paymentSplit, staffLeaderboard, refundsList] = await Promise.all([
 
