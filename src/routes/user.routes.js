@@ -15,10 +15,16 @@ r.get('/profile', protect, async (req, res, next) => {
 // PUT /users/profile
 r.put('/profile', protect, async (req, res, next) => {
   try {
-    const { name, phone, profilePicture, gstin } = req.body;
+    const { name, email, phone, profilePicture, gstin } = req.body;
+    
+    if (email) {
+      const existing = await User.findOne({ email, _id: { $ne: req.user._id } });
+      if (existing) return ApiResponse.error(res, 'Email is already in use', 400);
+    }
+
     const user = await User.findByIdAndUpdate(
       req.user._id,
-      { name, phone, profilePicture, gstin },
+      { name, email, phone, profilePicture, gstin },
       { new: true, runValidators: true }
     ).select('-password');
     return ApiResponse.success(res, user, 'Profile updated');
