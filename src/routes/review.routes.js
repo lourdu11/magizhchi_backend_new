@@ -1,7 +1,7 @@
 const express = require('express');
 const r = express.Router();
 const c = require('../controllers/review.controller');
-const { protect, isAdmin } = require('../middlewares/auth');
+const { protect, isAdmin, requirePermission } = require('../middlewares/auth');
 const { upload, validateMimeType, uploadToCloudinary } = require('../middlewares/upload.middleware');
 const { uploadLimiter } = require('../middlewares/rateLimiter');
 
@@ -26,9 +26,9 @@ r.post('/upload', protect, uploadLimiter, upload.array('images', 5), validateMim
 r.post('/:id/like', protect, c.likeReview);
 r.post('/:id/dislike', protect, c.dislikeReview);
 
-// Admin
-r.get('/all', protect, isAdmin, c.getAllReviews);
-r.put('/:id/status', protect, isAdmin, c.updateReviewStatus);
-r.delete('/:id', protect, isAdmin, c.deleteReview);
+// Admin / Authorized Staff
+r.get('/all', protect, requirePermission('reviews'), c.getAllReviews);
+r.put('/:id/status', protect, requirePermission('reviews'), c.updateReviewStatus);
+r.delete('/:id', protect, requirePermission('reviews'), c.deleteReview);
 
 module.exports = r;

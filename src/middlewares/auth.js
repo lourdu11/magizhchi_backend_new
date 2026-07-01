@@ -78,6 +78,21 @@ const isAdmin = authorize('admin');
 const isStaff = authorize('admin', 'staff');
 const isUser = authorize('admin', 'staff', 'user');
 
+const requirePermission = (moduleName) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return ApiResponse.unauthorized(res, 'Authentication required.');
+    }
+    if (req.user.role === 'admin') {
+      return next();
+    }
+    if (req.user.role === 'staff' && req.user.permissions?.includes(moduleName)) {
+      return next();
+    }
+    return ApiResponse.forbidden(res, `Missing required permission: ${moduleName}`);
+  };
+};
+
 // ── Enterprise Permission Helpers ──────────────────────────────
 const canViewBills = isStaff;     // Admin + Staff can see POS data
 const canEditInventory = isStaff; // Admin + Staff can scan/adjust stock
@@ -116,6 +131,6 @@ const optionalAuth = async (req, res, next) => {
 module.exports = { 
   protect, authorize, 
   isAdmin, isStaff, isUser, 
-  optionalAuth,
+  optionalAuth, requirePermission,
   canViewBills, canEditInventory, canManageOrders, canAdminister
 };

@@ -3,13 +3,13 @@ const r = express.Router();
 const c = require('../controllers/admin.controller');
 const publicController = require('../controllers/public.controller');
 const productController = require('../controllers/product.controller');
-const { protect, isAdmin, isStaff, authorize } = require('../middlewares/auth');
+const { protect, isAdmin, isStaff, authorize, requirePermission } = require('../middlewares/auth');
 
 r.use(protect); // All admin routes require login
 
-r.get('/dashboard', isAdmin, c.getDashboardStats);
+r.get('/dashboard', requirePermission('dashboard'), c.getDashboardStats);
 r.get('/health', authorize('admin', 'staff'), c.getServiceHealth);
-r.get('/analytics/sales', isAdmin, c.getSalesAnalytics);
+r.get('/analytics/sales', requirePermission('analytics'), c.getSalesAnalytics);
 const reportController = require('../controllers/report.controller');
 r.get('/reports/daily', isStaff, reportController.getDailyProfitReport);
 r.get('/staff/performance', isAdmin, c.getStaffPerformance);
@@ -59,9 +59,9 @@ r.post('/wastage', isStaff, wastageController.createWastage);
 
 // Settings & Config
 r.get('/settings', isStaff, c.getSettings);
-r.put('/settings', isAdmin, c.updateSettings);
-r.post('/test-notifications-v2', isAdmin, c.testNotifications);
-r.post('/reset-system-data', isAdmin, c.resetSystemData);
+r.put('/settings', requirePermission('settings'), c.updateSettings);
+r.post('/test-notifications-v2', requirePermission('settings'), c.testNotifications);
+r.post('/reset-system-data', requirePermission('settings'), c.resetSystemData);
 
 // ── Data Reset Safety Routes ──
 const backupController = require('../controllers/backup.controller');
@@ -71,16 +71,16 @@ r.get('/sync-integrity', isAdmin, c.getSyncIntegrityStats);
 
 // ─── Broadcast Center ─────────────────────────────────────────
 const broadcastController = require('../controllers/broadcast.controller');
-r.get('/broadcast/customers', isAdmin, broadcastController.getBroadcastCustomers);
-r.post('/broadcast/send', isAdmin, broadcastController.createBroadcast);
-r.get('/broadcast/history', isAdmin, broadcastController.getBroadcastHistory);
-r.get('/broadcast/details/:id', isAdmin, broadcastController.getBroadcastDetails);
-r.post('/broadcast/whatsapp/disconnect', isAdmin, broadcastController.disconnectWhatsApp);
+r.get('/broadcast/customers', requirePermission('broadcast'), broadcastController.getBroadcastCustomers);
+r.post('/broadcast/send', requirePermission('broadcast'), broadcastController.createBroadcast);
+r.get('/broadcast/history', requirePermission('broadcast'), broadcastController.getBroadcastHistory);
+r.get('/broadcast/details/:id', requirePermission('broadcast'), broadcastController.getBroadcastDetails);
+r.post('/broadcast/whatsapp/disconnect', requirePermission('broadcast'), broadcastController.disconnectWhatsApp);
 
 // Templates
-r.get('/broadcast/templates', isAdmin, broadcastController.getTemplates);
-r.post('/broadcast/templates', isAdmin, broadcastController.createTemplate);
-r.put('/broadcast/templates/:id', isAdmin, broadcastController.updateTemplate);
-r.delete('/broadcast/templates/:id', isAdmin, broadcastController.deleteTemplate);
+r.get('/broadcast/templates', requirePermission('broadcast'), broadcastController.getTemplates);
+r.post('/broadcast/templates', requirePermission('broadcast'), broadcastController.createTemplate);
+r.put('/broadcast/templates/:id', requirePermission('broadcast'), broadcastController.updateTemplate);
+r.delete('/broadcast/templates/:id', requirePermission('broadcast'), broadcastController.deleteTemplate);
 
 module.exports = r;
