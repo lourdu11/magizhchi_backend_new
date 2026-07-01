@@ -721,33 +721,46 @@ exports.createCustomer = async (req, res, next) => {
 
 exports.createStaff = async (req, res, next) => {
   try {
-    const { name, email, phone, password } = req.body;
+    const { name, email, phone, password, permissions } = req.body;
     
     // Normalize to match auth.controller logic
     const { normalizePhone } = require('../utils/normalize');
     const normalizedEmail = email?.toLowerCase().trim();
     const normalizedPhone = phone ? normalizePhone(phone) : phone;
 
-    const staff = await User.create({ name, email: normalizedEmail, phone: normalizedPhone, password, role: 'staff', isVerified: true });
-    return ApiResponse.created(res, { staff: { _id: staff._id, name, email, phone, role: 'staff' } }, 'Staff account created');
+    const staff = await User.create({ 
+      name, 
+      email: normalizedEmail || undefined, 
+      phone: normalizedPhone, 
+      password, 
+      permissions: permissions || [], 
+      role: 'staff', 
+      isVerified: true 
+    });
+    return ApiResponse.created(res, { staff: { _id: staff._id, name, email, phone, role: 'staff', permissions: staff.permissions } }, 'Staff account created');
   } catch (error) { next(error); }
 };
 
 exports.updateStaff = async (req, res, next) => {
   try {
-    const { name, email, phone, password } = req.body;
+    const { name, email, phone, password, permissions } = req.body;
     const staff = await User.findOne({ _id: req.params.id, role: 'staff' });
     if (!staff) return ApiResponse.notFound(res, 'Staff not found');
 
     const { normalizePhone } = require('../utils/normalize');
 
     staff.name = name || staff.name;
-    staff.email = email ? email.toLowerCase().trim() : staff.email;
+    
+    if (email !== undefined) {
+      staff.email = email ? email.toLowerCase().trim() : undefined;
+    }
+    
     staff.phone = phone ? normalizePhone(phone) : staff.phone;
     if (password) staff.password = password;
+    if (permissions) staff.permissions = permissions;
 
     await staff.save();
-    return ApiResponse.success(res, { staff: { _id: staff._id, name: staff.name, email: staff.email, phone: staff.phone, role: 'staff' } }, 'Staff account updated');
+    return ApiResponse.success(res, { staff: { _id: staff._id, name: staff.name, email: staff.email, phone: staff.phone, role: 'staff', permissions: staff.permissions } }, 'Staff account updated');
   } catch (error) { next(error); }
 };
 

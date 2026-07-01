@@ -55,6 +55,7 @@ const userSchema = new mongoose.Schema(
     lockUntil: { type: Date },
     refreshToken: { type: String, select: false },
     commissionRate: { type: Number, default: 0 }, // For staff: percentage of sales
+    permissions: [{ type: String }], // For staff: dynamic module access (e.g., 'orders', 'users', 'create-bill', 'bills')
     isDeleted: { type: Boolean, default: false },
   },
   { timestamps: true }

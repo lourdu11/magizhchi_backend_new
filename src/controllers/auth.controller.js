@@ -115,7 +115,7 @@ exports.login = async (req, res, next) => {
     logAudit({ userId: user._id, action: isNewUser ? 'SIGNUP' : 'LOGIN', module: 'AUTH', details: { identifier } });
 
     return ApiResponse.success(res, {
-      user: { _id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, isNewUser },
+      user: { _id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, permissions: user.permissions || [], isNewUser },
       accessToken,
     }, message);
   } catch (error) {
@@ -150,7 +150,7 @@ exports.verifyAdmin2FA = async (req, res, next) => {
     logger.info(`🔐 2FA SUCCESS: ${user.role} logged in: ${identifier}`);
 
     return ApiResponse.success(res, {
-      user: { _id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role },
+      user: { _id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, permissions: user.permissions || [] },
       accessToken,
     }, 'Access Authorized. Welcome back.');
   } catch (error) {
